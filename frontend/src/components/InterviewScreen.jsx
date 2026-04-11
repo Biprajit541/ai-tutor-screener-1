@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef, useCallback } from 'react'
 import OrbAnimation from './OrbAnimation'
 import TranscriptPanel from './TranscriptPanel'
 import { useAudioRecorder } from '../hooks/useAudioRecorder'
-import { sendChatMessage, speakText, createSpeechRecognizer } from '../utils/api'
+import { sendChatMessage, speakText } from '../utils/api'
 
 const STATUS = {
   idle:      'Press & hold to speak',
@@ -18,11 +18,15 @@ export default function InterviewScreen({ session, onComplete }) {
   const [isProcessing, setIsProcessing] = useState(false)
   const [liveText, setLiveText] = useState('')
   const [error, setError] = useState('')
+
   const recognizerRef = useRef(null)
   const finalTextRef = useRef('')
+  const interimTextRef = useRef('')
+  const isReleasedRef = useRef(false)
+  const processingLockRef = useRef(false)
+
   const { isRecording, audioLevel, startLevelTracking, stopLevelTracking } = useAudioRecorder()
 
-  // Speak opening on mount (voices may not be loaded yet — wait for them)
   useEffect(() => {
     const speak = () => speakText(opening_message, () => setOrbState('idle'))
     if (window.speechSynthesis.getVoices().length > 0) {
@@ -32,14 +36,54 @@ export default function InterviewScreen({ session, onComplete }) {
     }
   }, [])
 
+  const processAndRespond = useCallback(async (spokenText) => {
+    if (processingLockRef.current) return
+    processingLockRef.current = true
+
+    const text = spokenText.trim()
+    if (!text) {
+      setOrbState('idle')
+      setIsProcessing(false)
+      setError("I didn't catch that. Please hold and speak clearly.")
+      processingLockRef.current = false
+      return
+    }
+
+    setError('')
+    setLiveText('')
+    setOrbState('thinking')
+    setIsProcessing(true)
+
+    try {
+      setTranscript(prev => [...prev, { speaker: candidate_name, text }])
+      const { reply, is_complete } = await sendChatMessage(session_id, text)
+      setTranscript(prev => [...prev, { speaker: 'Aria', text: reply }])
+      setOrbState('speaking')
+      await speakText(reply, () => {
+        if (!is_complete) setOrbState('idle')
+      })
+      if (is_complete) {
+        setTimeout(() => onComplete(session_id), 2500)
+      }
+    } catch {
+      setError('Connection error. Please try again.')
+      setOrbState('idle')
+    } finally {
+      setIsProcessing(false)
+      processingLockRef.current = false
+    }
+  }, [session_id, candidate_name, onComplete])
+
   const handlePressStart = useCallback(async () => {
     if (isProcessing || orbState === 'speaking') return
     window.speechSynthesis.cancel()
     setError('')
     setLiveText('')
     finalTextRef.current = ''
+    interimTextRef.current = ''
+    isReleasedRef.current = false
+    processingLockRef.current = false
 
-    // Start mic level tracking for orb animation
     try {
       await startLevelTracking()
     } catch {
@@ -47,69 +91,73 @@ export default function InterviewScreen({ session, onComplete }) {
       return
     }
 
-    // Start speech recognition
-    const rec = createSpeechRecognizer(
-      (text, isFinal) => {
-        setLiveText(text)
-        if (isFinal) finalTextRef.current = text
-      },
-      () => {}, // onend — handled in handlePressEnd
-      (err) => {
-        if (err !== 'no-speech') setError(`Mic error: ${err}`)
-        setOrbState('idle')
-        stopLevelTracking()
-      }
-    )
-
-    if (rec) {
-      recognizerRef.current = rec
-      rec.start()
-      setOrbState('listening')
-    }
-  }, [isProcessing, orbState, startLevelTracking, stopLevelTracking])
-
-  const handlePressEnd = useCallback(async () => {
-    if (orbState !== 'listening') return
-
-    stopLevelTracking()
-    recognizerRef.current?.stop()
-    setOrbState('thinking')
-    setIsProcessing(true)
-    setLiveText('')
-
-    // Small wait to let recognizer fire final result
-    await new Promise(r => setTimeout(r, 600))
-
-    const spokenText = finalTextRef.current.trim()
-
-    if (!spokenText) {
-      setOrbState('idle')
-      setIsProcessing(false)
-      setError("I didn't catch that. Please hold and speak clearly.")
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition
+    if (!SR) {
+      setError('Please use Chrome or Edge for voice support.')
+      stopLevelTracking()
       return
     }
 
-    try {
-      setTranscript(prev => [...prev, { speaker: candidate_name, text: spokenText }])
+    const rec = new SR()
+    rec.continuous = true        // keep listening until we stop it
+    rec.interimResults = true
+    rec.lang = 'en-US'
+    rec.maxAlternatives = 1
 
-      const { reply, is_complete } = await sendChatMessage(session_id, spokenText)
-      setTranscript(prev => [...prev, { speaker: 'Aria', text: reply }])
-
-      setOrbState('speaking')
-      await speakText(reply, () => {
-        if (!is_complete) setOrbState('idle')
-      })
-
-      if (is_complete) {
-        setTimeout(() => onComplete(session_id), 2500)
+    rec.onresult = (e) => {
+      let interim = ''
+      let final = ''
+      for (let i = 0; i < e.results.length; i++) {
+        if (e.results[i].isFinal) {
+          final += e.results[i][0].transcript + ' '
+        } else {
+          interim += e.results[i][0].transcript
+        }
       }
-    } catch (err) {
-      setError('Connection error. Please check your internet and try again.')
-      setOrbState('idle')
-    } finally {
-      setIsProcessing(false)
+      if (final) finalTextRef.current = final.trim()
+      interimTextRef.current = interim
+      setLiveText(final || interim)
     }
-  }, [orbState, session_id, candidate_name, stopLevelTracking, onComplete])
+
+    rec.onend = () => {
+      // If user already released the button, process whatever we have
+      if (isReleasedRef.current) {
+        const best = finalTextRef.current || interimTextRef.current
+        processAndRespond(best)
+      }
+    }
+
+    rec.onerror = (e) => {
+      if (e.error === 'no-speech') {
+        // treat as empty — will show "didn't catch that"
+        if (isReleasedRef.current) processAndRespond('')
+      } else {
+        setError(`Mic error: ${e.error}`)
+        setOrbState('idle')
+        stopLevelTracking()
+      }
+    }
+
+    recognizerRef.current = rec
+    rec.start()
+    setOrbState('listening')
+  }, [isProcessing, orbState, startLevelTracking, stopLevelTracking, processAndRespond])
+
+  const handlePressEnd = useCallback(() => {
+    if (orbState !== 'listening') return
+    isReleasedRef.current = true
+    stopLevelTracking()
+
+    // Stop recognizer — onend will fire and call processAndRespond
+    if (recognizerRef.current) {
+      try {
+        recognizerRef.current.stop()
+      } catch {}
+    }
+
+    setOrbState('thinking')
+    setIsProcessing(true)
+  }, [orbState, stopLevelTracking])
 
   return (
     <div style={{
@@ -139,15 +187,20 @@ export default function InterviewScreen({ session, onComplete }) {
           {STATUS[orbState]}
         </p>
 
-        {/* Live speech preview */}
-        {liveText && (
-          <p style={{ fontSize: 13, color: 'var(--text-muted)', fontStyle: 'italic', marginBottom: '0.5rem', maxWidth: 400, textAlign: 'center' }}>
+        {liveText && orbState === 'listening' && (
+          <p style={{
+            fontSize: 13, color: 'var(--text-muted)', fontStyle: 'italic',
+            marginBottom: '0.5rem', maxWidth: 400, textAlign: 'center'
+          }}>
             "{liveText}"
           </p>
         )}
 
         {error && (
-          <p style={{ fontSize: 13, color: 'var(--red)', marginBottom: '1rem', maxWidth: 400, textAlign: 'center' }}>
+          <p style={{
+            fontSize: 13, color: 'var(--red)', marginBottom: '1rem',
+            maxWidth: 400, textAlign: 'center'
+          }}>
             {error}
           </p>
         )}
@@ -158,7 +211,10 @@ export default function InterviewScreen({ session, onComplete }) {
           background: 'var(--bg-card)', border: '1px solid var(--border-subtle)',
           borderRadius: 20, marginBottom: '2.5rem', overflow: 'hidden'
         }}>
-          <div style={{ padding: '0.75rem 1rem', borderBottom: '1px solid var(--border-subtle)', fontSize: 11, color: 'var(--text-muted)', fontWeight: 500, letterSpacing: '0.08em' }}>
+          <div style={{
+            padding: '0.75rem 1rem', borderBottom: '1px solid var(--border-subtle)',
+            fontSize: 11, color: 'var(--text-muted)', fontWeight: 500, letterSpacing: '0.08em'
+          }}>
             CONVERSATION
           </div>
           <TranscriptPanel transcript={transcript} />
