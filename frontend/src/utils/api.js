@@ -34,7 +34,13 @@ export function speakText(text, onEnd) {
   return new Promise((resolve) => {
     window.speechSynthesis.cancel()
 
-    setTimeout(() => {
+    // Poll until speechSynthesis is truly idle before starting
+    const waitUntilIdle = (cb) => {
+      if (!window.speechSynthesis.speaking) { cb(); return }
+      setTimeout(() => waitUntilIdle(cb), 100)
+    }
+
+    waitUntilIdle(() => {
       const utt = new SpeechSynthesisUtterance(text)
 
       const voices = window.speechSynthesis.getVoices()
@@ -47,29 +53,37 @@ export function speakText(text, onEnd) {
       utt.pitch = 1.05
       utt.volume = 1
 
-      let resolved = false
+      let finished = false
+
       const finish = () => {
-        if (resolved) return
-        resolved = true
-        // 1.2s buffer after speech ends — lets sound fully clear speakers
-        // before mic opens
-        setTimeout(() => {
-          onEnd?.()
-          resolve()
-        }, 1200)
+        if (finished) return
+        finished = true
+
+        // Poll until browser confirms speech has truly stopped
+        const waitForSilence = () => {
+          if (window.speechSynthesis.speaking) {
+            setTimeout(waitForSilence, 100)
+            return
+          }
+          // Extra 1.5s after confirmed stopped — clears speaker echo
+          setTimeout(() => {
+            onEnd?.()
+            resolve()
+          }, 1500)
+        }
+        waitForSilence()
       }
 
       utt.onend = finish
       utt.onerror = finish
 
-      // Fallback: if onend never fires (Chrome bug when tab loses focus)
-      // estimate duration from word count and resolve anyway
+      // Fallback timer in case onend never fires
       const wordCount = text.trim().split(/\s+/).length
-      const estimatedMs = Math.max((wordCount / 2.5) * 1000 + 2000, 4000)
+      const estimatedMs = Math.max((wordCount / 2.5) * 1000 + 3000, 5000)
       setTimeout(finish, estimatedMs)
 
       window.speechSynthesis.speak(utt)
-    }, 150)
+    })
   })
 }
 
