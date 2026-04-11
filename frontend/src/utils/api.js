@@ -32,58 +32,46 @@ export async function assessCandidate(sessionId) {
 
 export function speakText(text, onEnd) {
   return new Promise((resolve) => {
-    window.speechSynthesis.cancel()
+    try { window.speechSynthesis.cancel() } catch {}
 
-    // Poll until speechSynthesis is truly idle before starting
-    const waitUntilIdle = (cb) => {
-      if (!window.speechSynthesis.speaking) { cb(); return }
-      setTimeout(() => waitUntilIdle(cb), 100)
-    }
-
-    waitUntilIdle(() => {
+    const go = () => {
       const utt = new SpeechSynthesisUtterance(text)
-
       const voices = window.speechSynthesis.getVoices()
       const preferred = voices.find(v =>
         /female|woman|zira|samantha|karen|moira|victoria|fiona/i.test(v.name)
       ) || voices.find(v => v.lang.startsWith('en')) || voices[0]
-
       if (preferred) utt.voice = preferred
       utt.rate = 0.92
       utt.pitch = 1.05
       utt.volume = 1
 
-      let finished = false
-
+      let done = false
       const finish = () => {
-        if (finished) return
-        finished = true
-
-        // Poll until browser confirms speech has truly stopped
-        const waitForSilence = () => {
-          if (window.speechSynthesis.speaking) {
-            setTimeout(waitForSilence, 100)
-            return
-          }
-          // Extra 1.5s after confirmed stopped — clears speaker echo
-          setTimeout(() => {
-            onEnd?.()
-            resolve()
-          }, 1500)
-        }
-        waitForSilence()
+        if (done) return
+        done = true
+        // 300ms after speech ends — just enough to avoid echo, no noticeable delay
+        setTimeout(() => { try { onEnd?.() } catch {} resolve() }, 300)
       }
 
       utt.onend = finish
       utt.onerror = finish
 
-      // Fallback timer in case onend never fires
-      const wordCount = text.trim().split(/\s+/).length
-      const estimatedMs = Math.max((wordCount / 2.5) * 1000 + 3000, 5000)
-      setTimeout(finish, estimatedMs)
+      // Fallback if onend never fires (Chrome background tab bug)
+      const words = text.trim().split(/\s+/).length
+      const ms = Math.max((words / 2.5) * 1000 + 1500, 3000)
+      setTimeout(finish, ms)
 
-      window.speechSynthesis.speak(utt)
-    })
+      try { window.speechSynthesis.speak(utt) } catch { finish() }
+    }
+
+    // Wait for synthesis to be idle before starting
+    if (!window.speechSynthesis.speaking) {
+      go()
+    } else {
+      const wait = setInterval(() => {
+        if (!window.speechSynthesis.speaking) { clearInterval(wait); go() }
+      }, 100)
+    }
   })
 }
 
