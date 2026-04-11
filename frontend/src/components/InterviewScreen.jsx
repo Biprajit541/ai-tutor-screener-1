@@ -7,21 +7,25 @@ import { sendChatMessage, speakText } from '../utils/api'
 export default function InterviewScreen({ session, onComplete }) {
   const { session_id, opening_message, candidate_name } = session
 
-  const [orbState, setOrbState]     = useState('speaking')
-  const [transcript, setTranscript] = useState([{ speaker: 'Aria', text: opening_message }])
-  const [liveText, setLiveText]     = useState('')
-  const [error, setError]           = useState('')
-  const [micOpen, setMicOpen]       = useState(false)
+  const [orbState, setOrbState]       = useState('speaking')
+  const [transcript, setTranscript]   = useState(
+    // Guard the initial entry too
+    (opening_message && candidate_name !== undefined)
+      ? [{ speaker: 'Aria', text: String(opening_message) }]
+      : []
+  )
+  const [liveText, setLiveText]       = useState('')
+  const [error, setError]             = useState('')
+  const [micOpen, setMicOpen]         = useState(false)
   const [silenceWarn, setSilenceWarn] = useState(false)
-  const [statusText, setStatusText] = useState('Aria is speaking...')
+  const [statusText, setStatusText]   = useState('Aria is speaking...')
 
-  // Single source of truth — all logic uses refs, no stale closures
   const state = useRef({
     mounted: true,
     speaking: false,
     processing: false,
     micOn: false,
-    collected: '',   // accumulated final transcript text
+    collected: '',
     silTimer: null,
     warnTimer: null,
   })
@@ -29,11 +33,24 @@ export default function InterviewScreen({ session, onComplete }) {
   const recRef = useRef(null)
   const { audioLevel, startLevelTracking, stopLevelTracking } = useAudioRecorder()
 
-  const S = state.current // shorthand
+  const S = state.current
 
-  const safe = (fn) => { try { if (S.mounted) fn() } catch(e) { console.error(e) } }
+  const safe = (fn) => {
+    try { if (S.mounted) fn() } catch(e) { console.error('safe error:', e) }
+  }
 
-  // ── Stop everything ────────────────────────────────────────────────────────
+  // Guard every transcript push — never allow undefined speaker or text
+  const pushTranscript = (speaker, text) => {
+    if (!speaker || !text || typeof speaker !== 'string' || typeof text !== 'string') return
+    if (!speaker.trim() || !text.trim()) return
+    safe(() => setTranscript(prev => {
+      const safe = Array.isArray(prev)
+        ? prev.filter(e => e && typeof e.speaker === 'string' && typeof e.text === 'string')
+        : []
+      return [...safe, { speaker: speaker.trim(), text: text.trim() }]
+    }))
+  }
+
   const stopEverything = () => {
     clearTimeout(S.silTimer)
     clearTimeout(S.warnTimer)
@@ -45,7 +62,6 @@ export default function InterviewScreen({ session, onComplete }) {
     safe(() => { setMicOpen(false); setSilenceWarn(false) })
   }
 
-  // ── Send collected text to AI ──────────────────────────────────────────────
   const sendAnswer = async (text) => {
     if (!S.mounted || S.processing) return
     S.processing = true
@@ -70,15 +86,26 @@ export default function InterviewScreen({ session, onComplete }) {
       setError('')
       setOrbState('thinking')
       setStatusText('Aria is thinking...')
-      setTranscript(prev => [...prev, { speaker: candidate_name, text: clean }])
     })
 
+    // Push candidate answer safely
+    pushTranscript(String(candidate_name || 'Candidate'), clean)
+
     try {
-      const { reply, is_complete } = await sendChatMessage(session_id, clean)
+      const result = await sendChatMessage(session_id, clean)
       if (!S.mounted) return
 
+      // Guard the result object
+      if (!result || typeof result.reply !== 'string') {
+        throw new Error('Invalid response from server')
+      }
+
+      const { reply, is_complete } = result
+
+      // Push Aria reply safely
+      pushTranscript('Aria', reply)
+
       safe(() => {
-        setTranscript(prev => [...prev, { speaker: 'Aria', text: reply }])
         setOrbState('speaking')
         setStatusText('Aria is speaking...')
       })
@@ -104,7 +131,7 @@ export default function InterviewScreen({ session, onComplete }) {
       S.speaking = false
       S.processing = false
       safe(() => {
-        setError('Connection error — retrying.')
+        setError('Connection error — retrying in 3 seconds.')
         setOrbState('idle')
         setStatusText('Connection error')
       })
@@ -112,7 +139,6 @@ export default function InterviewScreen({ session, onComplete }) {
     }
   }
 
-  // ── Single-shot listen cycle ───────────────────────────────────────────────
   const listenOnce = () => {
     if (!S.mounted || S.processing || S.micOn || S.speaking) return
     if (window.speechSynthesis.speaking) return
@@ -123,10 +149,8 @@ export default function InterviewScreen({ session, onComplete }) {
       return
     }
 
-    // Reset collected text for this round
     S.collected = ''
 
-    // Start mic level tracking for orb animation
     startLevelTracking().catch(() => {
       safe(() => setError('Microphone access denied.'))
     })
@@ -141,7 +165,6 @@ export default function InterviewScreen({ session, onComplete }) {
       setStatusText('Listening — speak now')
     })
 
-    // Silence detection — 5s no speech → warn → 2s → send
     const startSilenceTimer = () => {
       clearTimeout(S.silTimer)
       clearTimeout(S.warnTimer)
@@ -156,70 +179,92 @@ export default function InterviewScreen({ session, onComplete }) {
       }, 5000)
     }
 
-    const rec = new SR()
-    // NOT continuous — single utterance mode
-    // We manually restart to collect more speech
+    let rec
+    try {
+      rec = new SR()
+    } catch (err) {
+      console.error('SR create failed:', err)
+      S.micOn = false
+      try { stopLevelTracking() } catch {}
+      safe(() => { setMicOpen(false); setError('Could not start mic. Tap to retry.') })
+      return
+    }
+
     rec.continuous = false
     rec.interimResults = true
     rec.lang = 'en-US'
     rec.maxAlternatives = 1
 
-    rec.onstart = () => {
-      startSilenceTimer()
-    }
+    rec.onstart = () => { startSilenceTimer() }
 
     rec.onresult = (e) => {
       try {
-        if (!e || !e.results || !e.results[0] || !e.results[0][0]) return
-        const result = e.results[0]
-        const transcript = result[0].transcript || ''
-        const isFinal = result.isFinal
+        // Triple-guard every access
+        if (!e) return
+        if (!e.results) return
+        if (e.results.length === 0) return
+        const firstResult = e.results[0]
+        if (!firstResult) return
+        if (firstResult.length === 0) return
+        const firstAlt = firstResult[0]
+        if (!firstAlt) return
+        const spokenText = firstAlt.transcript
+        if (typeof spokenText !== 'string') return
 
-        safe(() => setLiveText(S.collected + (isFinal ? '' : transcript)))
+        const isFinal = Boolean(firstResult.isFinal)
 
-        if (isFinal && transcript.trim()) {
-          S.collected += transcript + ' '
+        safe(() => setLiveText(S.collected + (isFinal ? '' : spokenText)))
+
+        if (isFinal && spokenText.trim()) {
+          S.collected += spokenText + ' '
           safe(() => setLiveText(S.collected.trim()))
         }
 
-        // Reset silence timer on any speech activity
         clearTimeout(S.silTimer)
         clearTimeout(S.warnTimer)
         safe(() => { setSilenceWarn(false); setStatusText('Listening — speak now') })
         startSilenceTimer()
       } catch (err) {
-        console.error('onresult safe error:', err)
+        // Never let onresult crash — swallow and log only
+        console.error('onresult error (swallowed):', err)
       }
     }
 
-    rec.onend = () => {
-      // Single-shot ended — restart to keep listening
+    const makeOnEnd = (currentRec) => () => {
       if (S.micOn && S.mounted && !S.processing) {
-        const nextRec = new SR()
+        let nextRec
+        try {
+          nextRec = new SR()
+        } catch {
+          S.micOn = false
+          try { stopLevelTracking() } catch {}
+          safe(() => setMicOpen(false))
+          return
+        }
         nextRec.continuous = false
         nextRec.interimResults = true
         nextRec.lang = 'en-US'
         nextRec.maxAlternatives = 1
-        nextRec.onresult = rec.onresult
-        nextRec.onend = rec.onend
-        nextRec.onerror = rec.onerror
+        nextRec.onresult = currentRec.onresult
+        nextRec.onerror = currentRec.onerror
+        nextRec.onend = makeOnEnd(nextRec)
         recRef.current = nextRec
         try { nextRec.start() } catch {}
       }
     }
 
+    rec.onend = makeOnEnd(rec)
+
     rec.onerror = (e) => {
       if (!S.micOn || !S.mounted) return
-      if (e.error === 'no-speech') {
-        // no-speech is fine — silence timer handles it
-        return
-      }
-      if (e.error === 'aborted') return
+      if (!e || e.error === 'no-speech' || e.error === 'aborted') return
       console.error('rec error:', e.error)
     }
 
     recRef.current = rec
-    try { rec.start() } catch (err) {
+    try {
+      rec.start()
+    } catch (err) {
       console.error('rec.start failed:', err)
       S.micOn = false
       try { stopLevelTracking() } catch {}
@@ -227,14 +272,13 @@ export default function InterviewScreen({ session, onComplete }) {
     }
   }
 
-  // ── Mount: speak opening → listen ─────────────────────────────────────────
   useEffect(() => {
     state.current.mounted = true
 
     const begin = () => {
       if (!S.mounted) return
       S.speaking = true
-      speakText(opening_message, () => {
+      speakText(opening_message || '', () => {
         S.speaking = false
         setTimeout(() => { if (S.mounted) listenOnce() }, 1000)
       })
@@ -248,7 +292,9 @@ export default function InterviewScreen({ session, onComplete }) {
         window.speechSynthesis.onvoiceschanged = null
         begin()
       }
-      setTimeout(() => { if (S.mounted && !S.speaking) begin() }, 2000)
+      setTimeout(() => {
+        if (S.mounted && !S.speaking) begin()
+      }, 2000)
     }
 
     return () => {
@@ -264,20 +310,15 @@ export default function InterviewScreen({ session, onComplete }) {
     }
   }, [])
 
-  // ── Manual mic tap ────────────────────────────────────────────────────────
   const handleMicClick = () => {
     if (S.processing) return
-
     if (S.speaking || window.speechSynthesis.speaking) {
-      // Interrupt Aria
       window.speechSynthesis.cancel()
       S.speaking = false
       setTimeout(() => { if (S.mounted) listenOnce() }, 400)
       return
     }
-
     if (S.micOn) {
-      // Force send now
       const toSend = S.collected
       sendAnswer(toSend)
     } else {
