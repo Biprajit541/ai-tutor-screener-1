@@ -26,7 +26,6 @@ export default function InterviewScreen({ session, onComplete }) {
 
   const { audioLevel, startLevelTracking, stopLevelTracking } = useAudioRecorder()
 
-  // Safe setState — never update after unmount
   const safeSet = (fn) => {
     try {
       if (mountedRef.current) fn()
@@ -197,7 +196,6 @@ export default function InterviewScreen({ session, onComplete }) {
       )
 
       const result = await sendChatMessage(session_id, clean)
-
       if (!mountedRef.current) return
 
       const { reply, is_complete } = result
@@ -208,10 +206,10 @@ export default function InterviewScreen({ session, onComplete }) {
         setStatusText('Aria is speaking...')
       })
 
+      // Wait for Aria to finish speaking
+      // speakText already has 1.2s buffer built in after speech ends
       await new Promise((resolve) => {
-        speakText(reply, () => {
-          resolve()
-        })
+        speakText(reply, () => { resolve() })
       })
 
       if (!mountedRef.current) return
@@ -225,7 +223,11 @@ export default function InterviewScreen({ session, onComplete }) {
         setTimeout(() => { if (mountedRef.current) onComplete(session_id) }, 2500)
       } else {
         processing.current = false
-        startMic()
+        // Extra 800ms on top of speakText's 1.2s buffer = 2s total gap
+        // before mic opens — prevents mic hearing Aria's voice
+        setTimeout(() => {
+          if (mountedRef.current) startMic()
+        }, 800)
       }
 
     } catch (err) {
@@ -241,7 +243,7 @@ export default function InterviewScreen({ session, onComplete }) {
     }
   }
 
-  // On mount
+  // On mount — speak opening then wait 2s before opening mic
   useEffect(() => {
     mountedRef.current = true
 
@@ -249,11 +251,16 @@ export default function InterviewScreen({ session, onComplete }) {
       if (!mountedRef.current) return
       try {
         speakText(opening_message, () => {
-          if (mountedRef.current) startMic()
+          // speakText has 1.2s buffer + extra 800ms = 2s total before mic opens
+          setTimeout(() => {
+            if (mountedRef.current) startMic()
+          }, 800)
         })
       } catch (e) {
         console.error('speakText error:', e)
-        if (mountedRef.current) startMic()
+        setTimeout(() => {
+          if (mountedRef.current) startMic()
+        }, 2000)
       }
     }
 
@@ -265,7 +272,7 @@ export default function InterviewScreen({ session, onComplete }) {
         window.speechSynthesis.onvoiceschanged = null
         begin()
       }
-      // Fallback if onvoiceschanged never fires (some browsers)
+      // Fallback if onvoiceschanged never fires
       setTimeout(() => {
         if (mountedRef.current && orbState === 'speaking') begin()
       }, 2000)
