@@ -63,3 +63,8 @@ input { font-family: inherit; }
   0%, 100% { transform: scaleY(0.3); }
   50% { transform: scaleY(1); }
 }
+
+@keyframes shrink {
+  from { width: 100%; }
+  to { width: 0%; }
+}
