@@ -15,24 +15,20 @@ export default function InterviewScreen({ session, onComplete }) {
   const [silenceWarn, setSilenceWarn] = useState(false)
   const [statusText, setStatusText]   = useState('Aria is speaking...')
 
-  const recRef        = useRef(null)
-  const finalRef      = useRef('')
-  const interimRef    = useRef('')
-  const timer1        = useRef(null)
-  const timer2        = useRef(null)
-  const processing    = useRef(false)
-  const micActive     = useRef(false)
-  const mountedRef    = useRef(true)
-  const speakingRef   = useRef(false)
+  const recRef      = useRef(null)
+  const finalRef    = useRef('')
+  const interimRef  = useRef('')
+  const timer1      = useRef(null)
+  const timer2      = useRef(null)
+  const processing  = useRef(false)
+  const micActive   = useRef(false)
+  const mountedRef  = useRef(true)
+  const speakingRef = useRef(false)
 
   const { audioLevel, startLevelTracking, stopLevelTracking } = useAudioRecorder()
 
   const safeSet = (fn) => {
-    try {
-      if (mountedRef.current) fn()
-    } catch (e) {
-      console.error('safeSet error:', e)
-    }
+    try { if (mountedRef.current) fn() } catch (e) { console.error('safeSet:', e) }
   }
 
   const clearTimers = () => {
@@ -45,131 +41,12 @@ export default function InterviewScreen({ session, onComplete }) {
     micActive.current = false
     try { stopLevelTracking() } catch {}
     try { recRef.current?.stop() } catch {}
-    safeSet(() => {
-      setMicOpen(false)
-      setSilenceWarn(false)
-    })
-  }
-
-  const startMic = async () => {
-    if (!mountedRef.current || processing.current || micActive.current) return
-
-    // HARD BLOCK — never open mic while AI is speaking
-    if (speakingRef.current || window.speechSynthesis.speaking) return
-
-    const SR = window.SpeechRecognition || window.webkitSpeechRecognition
-    if (!SR) {
-      safeSet(() => setError('Please use Chrome or Edge for voice support.'))
-      return
-    }
-
-    try {
-      await startLevelTracking()
-    } catch {
-      safeSet(() => setError('Microphone access denied. Please allow it and refresh.'))
-      return
-    }
-
-    if (!mountedRef.current) return
-
-    finalRef.current = ''
-    interimRef.current = ''
-    micActive.current = true
-
-    safeSet(() => {
-      setMicOpen(true)
-      setSilenceWarn(false)
-      setLiveText('')
-      setError('')
-      setOrbState('listening')
-      setStatusText('Listening — speak now')
-    })
-
-    const kickSilence = () => {
-      clearTimers()
-      timer1.current = setTimeout(() => {
-        if (!micActive.current || !mountedRef.current) return
-        safeSet(() => {
-          setSilenceWarn(true)
-          setStatusText('Closing in 2 seconds...')
-        })
-        timer2.current = setTimeout(() => {
-          if (!micActive.current || !mountedRef.current) return
-          const best = finalRef.current || interimRef.current
-          stopMic()
-          processAnswer(best)
-        }, 2000)
-      }, 5000)
-    }
-
-    let rec
-    try {
-      rec = new SR()
-    } catch (e) {
-      safeSet(() => setError('Could not start speech recognition.'))
-      micActive.current = false
-      return
-    }
-
-    rec.continuous = true
-    rec.interimResults = true
-    rec.lang = 'en-US'
-    rec.maxAlternatives = 1
-
-    rec.onstart = () => { kickSilence() }
-
-    rec.onresult = (e) => {
-      if (!micActive.current || !mountedRef.current) return
-      try {
-        let interim = ''
-        let final = ''
-        for (let i = 0; i < e.results.length; i++) {
-          if (e.results[i].isFinal) final += e.results[i][0].transcript + ' '
-          else interim += e.results[i][0].transcript
-        }
-        if (final) finalRef.current = final.trim()
-        interimRef.current = interim
-        safeSet(() => setLiveText(final.trim() || interim))
-        clearTimers()
-        safeSet(() => { setSilenceWarn(false); setStatusText('Listening — speak now') })
-        kickSilence()
-      } catch (e) {
-        console.error('onresult error:', e)
-      }
-    }
-
-    rec.onend = () => {
-      if (micActive.current && mountedRef.current && !processing.current) {
-        try {
-          rec.start()
-        } catch {
-          micActive.current = false
-          safeSet(() => setMicOpen(false))
-          try { stopLevelTracking() } catch {}
-          setTimeout(() => { if (mountedRef.current) startMic() }, 800)
-        }
-      }
-    }
-
-    rec.onerror = (e) => {
-      if (e.error === 'no-speech' || e.error === 'aborted') return
-      console.error('rec error:', e.error)
-      safeSet(() => setError(`Mic error: ${e.error} — tap to retry`))
-      stopMic()
-      safeSet(() => { setOrbState('idle'); setStatusText('Tap mic to retry') })
-    }
-
-    recRef.current = rec
-    try { rec.start() } catch (e) {
-      console.error('rec.start error:', e)
-      micActive.current = false
-      safeSet(() => { setMicOpen(false); setError('Could not start mic. Tap to retry.') })
-    }
+    recRef.current = null
+    safeSet(() => { setMicOpen(false); setSilenceWarn(false) })
   }
 
   const processAnswer = async (text) => {
-    if (!mountedRef.current) return
-    if (processing.current) return
+    if (!mountedRef.current || processing.current) return
     processing.current = true
 
     const clean = (text || '').trim()
@@ -211,28 +88,18 @@ export default function InterviewScreen({ session, onComplete }) {
       })
 
       speakingRef.current = true
-
-      await new Promise((resolve) => {
-        speakText(reply, () => { resolve() })
-      })
-
+      await new Promise((resolve) => { speakText(reply, resolve) })
       speakingRef.current = false
 
       if (!mountedRef.current) return
 
       if (is_complete) {
-        safeSet(() => {
-          setOrbState('idle')
-          setStatusText('Interview complete!')
-        })
+        safeSet(() => { setOrbState('idle'); setStatusText('Interview complete!') })
         processing.current = false
         setTimeout(() => { if (mountedRef.current) onComplete(session_id) }, 2500)
       } else {
         processing.current = false
-        // Extra 800ms on top of speakText's built-in silence detection
-        setTimeout(() => {
-          if (mountedRef.current) startMic()
-        }, 800)
+        setTimeout(() => { if (mountedRef.current) startMic() }, 800)
       }
 
     } catch (err) {
@@ -249,7 +116,124 @@ export default function InterviewScreen({ session, onComplete }) {
     }
   }
 
-  // On mount — speak opening then wait before opening mic
+  const startMic = async () => {
+    if (!mountedRef.current || processing.current || micActive.current) return
+    if (speakingRef.current || window.speechSynthesis.speaking) return
+
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition
+    if (!SR) {
+      safeSet(() => setError('Please use Chrome or Edge for voice support.'))
+      return
+    }
+
+    try { await startLevelTracking() } catch {
+      safeSet(() => setError('Microphone access denied. Please allow it and refresh.'))
+      return
+    }
+
+    if (!mountedRef.current) return
+
+    finalRef.current = ''
+    interimRef.current = ''
+    micActive.current = true
+
+    safeSet(() => {
+      setMicOpen(true)
+      setSilenceWarn(false)
+      setLiveText('')
+      setError('')
+      setOrbState('listening')
+      setStatusText('Listening — speak now')
+    })
+
+    const kickSilence = () => {
+      clearTimers()
+      timer1.current = setTimeout(() => {
+        if (!micActive.current || !mountedRef.current) return
+        safeSet(() => { setSilenceWarn(true); setStatusText('Closing in 2 seconds...') })
+        timer2.current = setTimeout(() => {
+          if (!micActive.current || !mountedRef.current) return
+          const best = finalRef.current || interimRef.current
+          stopMic()
+          processAnswer(best)
+        }, 2000)
+      }, 5000)
+    }
+
+    let rec
+    try { rec = new SR() } catch {
+      safeSet(() => setError('Could not start speech recognition.'))
+      micActive.current = false
+      try { stopLevelTracking() } catch {}
+      return
+    }
+
+    rec.continuous = true
+    rec.interimResults = true
+    rec.lang = 'en-US'
+    rec.maxAlternatives = 1
+
+    rec.onstart = () => { kickSilence() }
+
+    rec.onresult = (e) => {
+      // Guard: if mic was stopped, ignore stale results
+      if (!micActive.current || !mountedRef.current) return
+      try {
+        let interim = ''
+        let final = ''
+        const results = e.results
+        if (!results || results.length === 0) return
+        for (let i = 0; i < results.length; i++) {
+          const result = results[i]
+          // Guard each result item
+          if (!result || !result[0]) continue
+          if (result.isFinal) {
+            final += (result[0].transcript || '') + ' '
+          } else {
+            interim += (result[0].transcript || '')
+          }
+        }
+        if (final.trim()) finalRef.current = final.trim()
+        if (interim) interimRef.current = interim
+        safeSet(() => setLiveText(final.trim() || interim))
+        clearTimers()
+        safeSet(() => { setSilenceWarn(false); setStatusText('Listening — speak now') })
+        kickSilence()
+      } catch (err) {
+        console.error('onresult error:', err)
+      }
+    }
+
+    rec.onend = () => {
+      // Only restart if mic is still meant to be active
+      if (micActive.current && mountedRef.current && !processing.current) {
+        try {
+          rec.start()
+        } catch {
+          micActive.current = false
+          safeSet(() => setMicOpen(false))
+          try { stopLevelTracking() } catch {}
+          setTimeout(() => { if (mountedRef.current) startMic() }, 800)
+        }
+      }
+    }
+
+    rec.onerror = (e) => {
+      if (e.error === 'no-speech' || e.error === 'aborted') return
+      console.error('rec error:', e.error)
+      safeSet(() => setError(`Mic error: ${e.error} — tap to retry`))
+      stopMic()
+      safeSet(() => { setOrbState('idle'); setStatusText('Tap mic to retry') })
+    }
+
+    recRef.current = rec
+    try { rec.start() } catch (err) {
+      console.error('rec.start error:', err)
+      micActive.current = false
+      safeSet(() => { setMicOpen(false); setError('Could not start mic. Tap to retry.') })
+    }
+  }
+
   useEffect(() => {
     mountedRef.current = true
 
@@ -259,16 +243,12 @@ export default function InterviewScreen({ session, onComplete }) {
         speakingRef.current = true
         speakText(opening_message, () => {
           speakingRef.current = false
-          setTimeout(() => {
-            if (mountedRef.current) startMic()
-          }, 800)
+          setTimeout(() => { if (mountedRef.current) startMic() }, 800)
         })
       } catch (e) {
         console.error('speakText error:', e)
         speakingRef.current = false
-        setTimeout(() => {
-          if (mountedRef.current) startMic()
-        }, 2000)
+        setTimeout(() => { if (mountedRef.current) startMic() }, 2000)
       }
     }
 
@@ -281,7 +261,7 @@ export default function InterviewScreen({ session, onComplete }) {
         begin()
       }
       setTimeout(() => {
-        if (mountedRef.current && speakingRef.current === false) begin()
+        if (mountedRef.current && !speakingRef.current) begin()
       }, 2000)
     }
 
@@ -297,7 +277,7 @@ export default function InterviewScreen({ session, onComplete }) {
   const handleMicClick = () => {
     if (processing.current || orbState === 'thinking') return
     if (speakingRef.current || window.speechSynthesis.speaking) {
-      // Interrupt Aria and open mic immediately
+      // Interrupt Aria
       window.speechSynthesis.cancel()
       speakingRef.current = false
       setTimeout(() => { if (mountedRef.current) startMic() }, 300)
@@ -324,7 +304,6 @@ export default function InterviewScreen({ session, onComplete }) {
       background: 'radial-gradient(ellipse at 30% 70%, rgba(124,111,247,0.08) 0%, transparent 55%), var(--bg)'
     }}>
 
-      {/* Header */}
       <div style={{
         padding: '1.25rem 2rem', display: 'flex',
         alignItems: 'center', justifyContent: 'space-between',
@@ -344,7 +323,6 @@ export default function InterviewScreen({ session, onComplete }) {
         <span style={{ fontSize: 13, color: 'var(--text-muted)' }}>{candidate_name}</span>
       </div>
 
-      {/* Body */}
       <div style={{
         flex: 1, display: 'flex', flexDirection: 'column',
         alignItems: 'center', padding: '2.5rem 1rem 2rem'
