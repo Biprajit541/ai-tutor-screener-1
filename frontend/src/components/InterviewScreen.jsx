@@ -7,143 +7,73 @@ import { sendChatMessage, speakText } from '../utils/api'
 export default function InterviewScreen({ session, onComplete }) {
   const { session_id, opening_message, candidate_name } = session
 
-  const [orbState, setOrbState]     = useState('speaking')
-  const [transcript, setTranscript] = useState([{ speaker: 'Aria', text: opening_message }])
-  const [liveText, setLiveText]     = useState('')
-  const [error, setError]           = useState('')
-  const [micOpen, setMicOpen]       = useState(false)
+  const [orbState, setOrbState]       = useState('speaking')
+  const [transcript, setTranscript]   = useState([{ speaker: 'Aria', text: opening_message }])
+  const [liveText, setLiveText]       = useState('')
+  const [error, setError]             = useState('')
+  const [micOpen, setMicOpen]         = useState(false)
   const [silenceWarn, setSilenceWarn] = useState(false)
-  const [statusText, setStatusText] = useState('Aria is speaking...')
+  const [statusText, setStatusText]   = useState('Aria is speaking...')
 
-  // All mutable state in refs to avoid stale closures
-  const recRef           = useRef(null)
-  const finalRef         = useRef('')
-  const interimRef       = useRef('')
-  const silenceTimer1    = useRef(null)
-  const silenceTimer2    = useRef(null)
-  const processing       = useRef(false)
-  const micActive        = useRef(false)
-  const mounted          = useRef(true)
+  const recRef        = useRef(null)
+  const finalRef      = useRef('')
+  const interimRef    = useRef('')
+  const timer1        = useRef(null)
+  const timer2        = useRef(null)
+  const processing    = useRef(false)
+  const micActive     = useRef(false)
+  const mountedRef    = useRef(true)
 
   const { audioLevel, startLevelTracking, stopLevelTracking } = useAudioRecorder()
 
-  // ── Safe state setters (no-op after unmount) ──────────────────────────────
-  const safe = (fn) => { if (mounted.current) fn() }
-
-  // ── Clear silence timers ──────────────────────────────────────────────────
-  const clearTimers = () => {
-    clearTimeout(silenceTimer1.current)
-    clearTimeout(silenceTimer2.current)
+  // Safe setState — never update after unmount
+  const safeSet = (fn) => {
+    try {
+      if (mountedRef.current) fn()
+    } catch (e) {
+      console.error('safeSet error:', e)
+    }
   }
 
-  // ── Stop microphone ───────────────────────────────────────────────────────
+  const clearTimers = () => {
+    clearTimeout(timer1.current)
+    clearTimeout(timer2.current)
+  }
+
   const stopMic = () => {
     clearTimers()
     micActive.current = false
-    stopLevelTracking()
+    try { stopLevelTracking() } catch {}
     try { recRef.current?.stop() } catch {}
-    safe(() => {
+    safeSet(() => {
       setMicOpen(false)
       setSilenceWarn(false)
     })
   }
 
-  // ── Send answer to AI, speak reply, reopen mic ────────────────────────────
-  const processAnswer = async (text) => {
-    if (processing.current) return
-    if (!mounted.current) return
-    processing.current = true
-
-    const clean = text.trim()
-    safe(() => { setLiveText('') })
-    finalRef.current = ''
-    interimRef.current = ''
-
-    if (!clean) {
-      safe(() => {
-        setError("I didn't catch that — mic will reopen in a moment.")
-        setOrbState('idle')
-        setStatusText('Tap mic or wait to retry')
-      })
-      processing.current = false
-      setTimeout(() => { if (mounted.current) startMic() }, 2000)
-      return
-    }
-
-    safe(() => {
-      setError('')
-      setOrbState('thinking')
-      setStatusText('Aria is thinking...')
-    })
-
-    try {
-      safe(() => setTranscript(prev => [...prev, { speaker: candidate_name, text: clean }]))
-
-      const { reply, is_complete } = await sendChatMessage(session_id, clean)
-
-      if (!mounted.current) return
-
-      safe(() => {
-        setTranscript(prev => [...prev, { speaker: 'Aria', text: reply }])
-        setOrbState('speaking')
-        setStatusText('Aria is speaking...')
-      })
-
-      await speakText(reply, () => {
-        if (!mounted.current) return
-        if (!is_complete) {
-          processing.current = false
-          startMic()
-        }
-      })
-
-      if (is_complete) {
-        processing.current = false
-        safe(() => {
-          setOrbState('idle')
-          setStatusText('Interview complete!')
-        })
-        setTimeout(() => { if (mounted.current) onComplete(session_id) }, 2500)
-      }
-
-    } catch {
-      if (!mounted.current) return
-      safe(() => {
-        setError('Connection error — retrying in 3 seconds.')
-        setOrbState('idle')
-        setStatusText('Connection error')
-      })
-      processing.current = false
-      setTimeout(() => { if (mounted.current) startMic() }, 3000)
-    }
-  }
-
-  // ── Start microphone + speech recognition ────────────────────────────────
   const startMic = async () => {
-    if (!mounted.current) return
-    if (processing.current) return
-    if (micActive.current) return
+    if (!mountedRef.current || processing.current || micActive.current) return
 
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition
     if (!SR) {
-      safe(() => setError('Please use Chrome or Edge for voice support.'))
+      safeSet(() => setError('Please use Chrome or Edge for voice support.'))
       return
     }
 
     try {
       await startLevelTracking()
     } catch {
-      safe(() => setError('Please allow microphone access in your browser.'))
+      safeSet(() => setError('Microphone access denied. Please allow it and refresh.'))
       return
     }
 
-    if (!mounted.current) return
+    if (!mountedRef.current) return
 
     finalRef.current = ''
     interimRef.current = ''
     micActive.current = true
 
-    safe(() => {
+    safeSet(() => {
       setMicOpen(true)
       setSilenceWarn(false)
       setLiveText('')
@@ -152,16 +82,16 @@ export default function InterviewScreen({ session, onComplete }) {
       setStatusText('Listening — speak now')
     })
 
-    const startSilenceCountdown = () => {
+    const kickSilence = () => {
       clearTimers()
-      silenceTimer1.current = setTimeout(() => {
-        if (!micActive.current) return
-        safe(() => {
+      timer1.current = setTimeout(() => {
+        if (!micActive.current || !mountedRef.current) return
+        safeSet(() => {
           setSilenceWarn(true)
           setStatusText('Closing in 2 seconds...')
         })
-        silenceTimer2.current = setTimeout(() => {
-          if (!micActive.current) return
+        timer2.current = setTimeout(() => {
+          if (!micActive.current || !mountedRef.current) return
           const best = finalRef.current || interimRef.current
           stopMic()
           processAnswer(best)
@@ -169,109 +99,198 @@ export default function InterviewScreen({ session, onComplete }) {
       }, 5000)
     }
 
-    const rec = new SR()
+    let rec
+    try {
+      rec = new SR()
+    } catch (e) {
+      safeSet(() => setError('Could not start speech recognition.'))
+      micActive.current = false
+      return
+    }
+
     rec.continuous = true
     rec.interimResults = true
     rec.lang = 'en-US'
     rec.maxAlternatives = 1
 
-    rec.onstart = () => {
-      startSilenceCountdown()
-    }
+    rec.onstart = () => { kickSilence() }
 
     rec.onresult = (e) => {
-      if (!micActive.current) return
-      let interim = ''
-      let final = ''
-      for (let i = 0; i < e.results.length; i++) {
-        if (e.results[i].isFinal) final += e.results[i][0].transcript + ' '
-        else interim += e.results[i][0].transcript
+      if (!micActive.current || !mountedRef.current) return
+      try {
+        let interim = ''
+        let final = ''
+        for (let i = 0; i < e.results.length; i++) {
+          if (e.results[i].isFinal) final += e.results[i][0].transcript + ' '
+          else interim += e.results[i][0].transcript
+        }
+        if (final) finalRef.current = final.trim()
+        interimRef.current = interim
+        safeSet(() => setLiveText(final.trim() || interim))
+        clearTimers()
+        safeSet(() => { setSilenceWarn(false); setStatusText('Listening — speak now') })
+        kickSilence()
+      } catch (e) {
+        console.error('onresult error:', e)
       }
-      if (final) finalRef.current = final.trim()
-      interimRef.current = interim
-      safe(() => setLiveText(final.trim() || interim))
-
-      // Reset silence timer on any speech
-      clearTimers()
-      safe(() => {
-        setSilenceWarn(false)
-        setStatusText('Listening — speak now')
-      })
-      startSilenceCountdown()
     }
 
     rec.onend = () => {
-      // Chrome auto-stops recognition — restart if mic still active
-      if (micActive.current && mounted.current && !processing.current) {
+      if (micActive.current && mountedRef.current && !processing.current) {
         try {
           rec.start()
         } catch {
-          // recognizer broken — reset and restart fresh
           micActive.current = false
-          stopLevelTracking()
-          safe(() => setMicOpen(false))
-          setTimeout(() => { if (mounted.current) startMic() }, 500)
+          safeSet(() => setMicOpen(false))
+          try { stopLevelTracking() } catch {}
+          setTimeout(() => { if (mountedRef.current) startMic() }, 800)
         }
       }
     }
 
     rec.onerror = (e) => {
       if (e.error === 'no-speech' || e.error === 'aborted') return
-      safe(() => setError(`Mic error: ${e.error}`))
+      console.error('rec error:', e.error)
+      safeSet(() => setError(`Mic error: ${e.error} — tap to retry`))
       stopMic()
-      safe(() => {
-        setOrbState('idle')
-        setStatusText('Mic error — tap to retry')
-      })
+      safeSet(() => { setOrbState('idle'); setStatusText('Tap mic to retry') })
     }
 
     recRef.current = rec
-    try { rec.start() } catch {}
+    try { rec.start() } catch (e) {
+      console.error('rec.start error:', e)
+      micActive.current = false
+      safeSet(() => { setMicOpen(false); setError('Could not start mic. Tap to retry.') })
+    }
   }
 
-  // ── On mount: speak opening then start mic ────────────────────────────────
-  useEffect(() => {
-    mounted.current = true
+  const processAnswer = async (text) => {
+    if (!mountedRef.current) return
+    if (processing.current) return
+    processing.current = true
 
-    const begin = () => {
-      if (!mounted.current) return
-      speakText(opening_message, () => {
-        if (mounted.current) startMic()
+    const clean = (text || '').trim()
+    safeSet(() => setLiveText(''))
+    finalRef.current = ''
+    interimRef.current = ''
+
+    if (!clean) {
+      safeSet(() => {
+        setError("Didn't catch that — mic will reopen shortly.")
+        setOrbState('idle')
+        setStatusText('Retrying...')
       })
+      processing.current = false
+      setTimeout(() => { if (mountedRef.current) startMic() }, 2000)
+      return
     }
 
-    if (window.speechSynthesis.getVoices().length > 0) {
+    safeSet(() => {
+      setError('')
+      setOrbState('thinking')
+      setStatusText('Aria is thinking...')
+    })
+
+    try {
+      safeSet(() =>
+        setTranscript(prev => [...prev, { speaker: candidate_name, text: clean }])
+      )
+
+      const result = await sendChatMessage(session_id, clean)
+
+      if (!mountedRef.current) return
+
+      const { reply, is_complete } = result
+
+      safeSet(() => {
+        setTranscript(prev => [...prev, { speaker: 'Aria', text: reply }])
+        setOrbState('speaking')
+        setStatusText('Aria is speaking...')
+      })
+
+      await new Promise((resolve) => {
+        speakText(reply, () => {
+          resolve()
+        })
+      })
+
+      if (!mountedRef.current) return
+
+      if (is_complete) {
+        safeSet(() => {
+          setOrbState('idle')
+          setStatusText('Interview complete!')
+        })
+        processing.current = false
+        setTimeout(() => { if (mountedRef.current) onComplete(session_id) }, 2500)
+      } else {
+        processing.current = false
+        startMic()
+      }
+
+    } catch (err) {
+      console.error('processAnswer error:', err)
+      if (!mountedRef.current) return
+      safeSet(() => {
+        setError('Connection error — retrying in 3 seconds.')
+        setOrbState('idle')
+        setStatusText('Connection error')
+      })
+      processing.current = false
+      setTimeout(() => { if (mountedRef.current) startMic() }, 3000)
+    }
+  }
+
+  // On mount
+  useEffect(() => {
+    mountedRef.current = true
+
+    const begin = () => {
+      if (!mountedRef.current) return
+      try {
+        speakText(opening_message, () => {
+          if (mountedRef.current) startMic()
+        })
+      } catch (e) {
+        console.error('speakText error:', e)
+        if (mountedRef.current) startMic()
+      }
+    }
+
+    const voices = window.speechSynthesis.getVoices()
+    if (voices.length > 0) {
       begin()
     } else {
       window.speechSynthesis.onvoiceschanged = () => {
         window.speechSynthesis.onvoiceschanged = null
         begin()
       }
+      // Fallback if onvoiceschanged never fires (some browsers)
+      setTimeout(() => {
+        if (mountedRef.current && orbState === 'speaking') begin()
+      }, 2000)
     }
 
     return () => {
-      mounted.current = false
+      mountedRef.current = false
       clearTimers()
       stopMic()
-      window.speechSynthesis.cancel()
+      try { window.speechSynthesis.cancel() } catch {}
     }
-  }, []) // empty deps — runs once only
+  }, [])
 
-  // ── Manual mic tap ────────────────────────────────────────────────────────
   const handleMicClick = () => {
     if (processing.current || orbState === 'thinking') return
     if (micActive.current) {
-      // Force close and send
       const best = finalRef.current || interimRef.current
       stopMic()
       processAnswer(best)
     } else {
-      window.speechSynthesis.cancel()
+      try { window.speechSynthesis.cancel() } catch {}
       startMic()
     }
   }
 
-  // ── Render ────────────────────────────────────────────────────────────────
   const micColor = micOpen
     ? 'linear-gradient(135deg, #6ff7b8, #3dd68f)'
     : orbState === 'thinking'
@@ -310,12 +329,10 @@ export default function InterviewScreen({ session, onComplete }) {
         alignItems: 'center', padding: '2.5rem 1rem 2rem'
       }}>
 
-        {/* Orb */}
         <div style={{ marginBottom: '1.25rem' }}>
           <OrbAnimation state={orbState} audioLevel={audioLevel} />
         </div>
 
-        {/* Status */}
         <p style={{
           fontSize: 14, fontWeight: 500, minHeight: 22, marginBottom: '0.4rem',
           color: silenceWarn ? '#f7a26f' : 'var(--text-secondary)',
@@ -324,7 +341,6 @@ export default function InterviewScreen({ session, onComplete }) {
           {statusText}
         </p>
 
-        {/* Silence countdown bar */}
         {silenceWarn && (
           <div style={{
             width: 180, height: 3, borderRadius: 2,
@@ -337,21 +353,18 @@ export default function InterviewScreen({ session, onComplete }) {
           </div>
         )}
 
-        {/* Live text */}
         {liveText && orbState === 'listening' && (
           <div style={{
             maxWidth: 480, padding: '8px 14px', marginBottom: '0.75rem',
             background: 'rgba(124,111,247,0.08)',
             border: '1px solid rgba(124,111,247,0.2)',
             borderRadius: 12, fontSize: 13, color: 'var(--text-secondary)',
-            fontStyle: 'italic', textAlign: 'center',
-            animation: 'fadeSlideUp 0.2s ease'
+            fontStyle: 'italic', textAlign: 'center'
           }}>
             "{liveText}"
           </div>
         )}
 
-        {/* Error */}
         {error && (
           <p style={{
             fontSize: 13, color: 'var(--red)', marginBottom: '0.75rem',
@@ -361,7 +374,6 @@ export default function InterviewScreen({ session, onComplete }) {
           </p>
         )}
 
-        {/* Transcript */}
         <div style={{
           width: '100%', maxWidth: 580, marginBottom: '2rem',
           background: 'var(--bg-card)', border: '1px solid var(--border-subtle)',
@@ -376,7 +388,6 @@ export default function InterviewScreen({ session, onComplete }) {
           <TranscriptPanel transcript={transcript} />
         </div>
 
-        {/* Mic button */}
         <button
           onClick={handleMicClick}
           disabled={orbState === 'thinking'}
