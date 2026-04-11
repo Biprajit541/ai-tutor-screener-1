@@ -23,6 +23,7 @@ export default function InterviewScreen({ session, onComplete }) {
   const processing    = useRef(false)
   const micActive     = useRef(false)
   const mountedRef    = useRef(true)
+  const speakingRef   = useRef(false)
 
   const { audioLevel, startLevelTracking, stopLevelTracking } = useAudioRecorder()
 
@@ -52,6 +53,9 @@ export default function InterviewScreen({ session, onComplete }) {
 
   const startMic = async () => {
     if (!mountedRef.current || processing.current || micActive.current) return
+
+    // HARD BLOCK — never open mic while AI is speaking
+    if (speakingRef.current || window.speechSynthesis.speaking) return
 
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition
     if (!SR) {
@@ -206,11 +210,13 @@ export default function InterviewScreen({ session, onComplete }) {
         setStatusText('Aria is speaking...')
       })
 
-      // Wait for Aria to finish speaking
-      // speakText already has 1.2s buffer built in after speech ends
+      speakingRef.current = true
+
       await new Promise((resolve) => {
         speakText(reply, () => { resolve() })
       })
+
+      speakingRef.current = false
 
       if (!mountedRef.current) return
 
@@ -223,8 +229,7 @@ export default function InterviewScreen({ session, onComplete }) {
         setTimeout(() => { if (mountedRef.current) onComplete(session_id) }, 2500)
       } else {
         processing.current = false
-        // Extra 800ms on top of speakText's 1.2s buffer = 2s total gap
-        // before mic opens — prevents mic hearing Aria's voice
+        // Extra 800ms on top of speakText's built-in silence detection
         setTimeout(() => {
           if (mountedRef.current) startMic()
         }, 800)
@@ -233,6 +238,7 @@ export default function InterviewScreen({ session, onComplete }) {
     } catch (err) {
       console.error('processAnswer error:', err)
       if (!mountedRef.current) return
+      speakingRef.current = false
       safeSet(() => {
         setError('Connection error — retrying in 3 seconds.')
         setOrbState('idle')
@@ -243,21 +249,23 @@ export default function InterviewScreen({ session, onComplete }) {
     }
   }
 
-  // On mount — speak opening then wait 2s before opening mic
+  // On mount — speak opening then wait before opening mic
   useEffect(() => {
     mountedRef.current = true
 
     const begin = () => {
       if (!mountedRef.current) return
       try {
+        speakingRef.current = true
         speakText(opening_message, () => {
-          // speakText has 1.2s buffer + extra 800ms = 2s total before mic opens
+          speakingRef.current = false
           setTimeout(() => {
             if (mountedRef.current) startMic()
           }, 800)
         })
       } catch (e) {
         console.error('speakText error:', e)
+        speakingRef.current = false
         setTimeout(() => {
           if (mountedRef.current) startMic()
         }, 2000)
@@ -272,14 +280,14 @@ export default function InterviewScreen({ session, onComplete }) {
         window.speechSynthesis.onvoiceschanged = null
         begin()
       }
-      // Fallback if onvoiceschanged never fires
       setTimeout(() => {
-        if (mountedRef.current && orbState === 'speaking') begin()
+        if (mountedRef.current && speakingRef.current === false) begin()
       }, 2000)
     }
 
     return () => {
       mountedRef.current = false
+      speakingRef.current = false
       clearTimers()
       stopMic()
       try { window.speechSynthesis.cancel() } catch {}
@@ -288,12 +296,18 @@ export default function InterviewScreen({ session, onComplete }) {
 
   const handleMicClick = () => {
     if (processing.current || orbState === 'thinking') return
+    if (speakingRef.current || window.speechSynthesis.speaking) {
+      // Interrupt Aria and open mic immediately
+      window.speechSynthesis.cancel()
+      speakingRef.current = false
+      setTimeout(() => { if (mountedRef.current) startMic() }, 300)
+      return
+    }
     if (micActive.current) {
       const best = finalRef.current || interimRef.current
       stopMic()
       processAnswer(best)
     } else {
-      try { window.speechSynthesis.cancel() } catch {}
       startMic()
     }
   }
@@ -428,6 +442,8 @@ export default function InterviewScreen({ session, onComplete }) {
             ? 'Mic open — closes after 5s silence'
             : orbState === 'thinking'
             ? 'Processing your answer...'
+            : orbState === 'speaking'
+            ? 'Tap mic to interrupt Aria'
             : 'Tap mic to speak manually'}
         </p>
 
