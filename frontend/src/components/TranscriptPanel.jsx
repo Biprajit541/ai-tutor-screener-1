@@ -7,12 +7,22 @@ export default function TranscriptPanel({ transcript }) {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [transcript])
 
+  // Guard against undefined/null entries
+  const safeTranscript = Array.isArray(transcript)
+    ? transcript.filter(entry => entry && typeof entry.speaker === 'string' && typeof entry.text === 'string')
+    : []
+
   return (
     <div style={{
       width: '100%', maxHeight: 280, overflowY: 'auto',
       padding: '1rem', display: 'flex', flexDirection: 'column', gap: 12
     }}>
-      {transcript.map((entry, i) => (
+      {safeTranscript.length === 0 && (
+        <p style={{ fontSize: 13, color: 'var(--text-muted)', textAlign: 'center' }}>
+          Conversation will appear here...
+        </p>
+      )}
+      {safeTranscript.map((entry, i) => (
         <div key={i} style={{
           display: 'flex', gap: 10, alignItems: 'flex-start',
           animation: 'fadeSlideUp 0.3s ease both',
@@ -26,12 +36,16 @@ export default function TranscriptPanel({ transcript }) {
             display: 'flex', alignItems: 'center', justifyContent: 'center',
             fontSize: 11, fontWeight: 600, color: '#fff'
           }}>
-            {entry.speaker === 'Aria' ? 'A' : entry.speaker[0]?.toUpperCase()}
+            {entry.speaker === 'Aria' ? 'A' : (entry.speaker[0] || '?').toUpperCase()}
           </div>
           <div style={{
             maxWidth: '75%', padding: '8px 12px', borderRadius: 12,
-            background: entry.speaker === 'Aria' ? 'var(--bg-elevated)' : 'rgba(124,111,247,0.1)',
-            border: `1px solid ${entry.speaker === 'Aria' ? 'var(--border-subtle)' : 'rgba(124,111,247,0.2)'}`,
+            background: entry.speaker === 'Aria'
+              ? 'var(--bg-elevated)'
+              : 'rgba(124,111,247,0.1)',
+            border: `1px solid ${entry.speaker === 'Aria'
+              ? 'var(--border-subtle)'
+              : 'rgba(124,111,247,0.2)'}`,
             fontSize: 13, lineHeight: 1.6, color: 'var(--text-secondary)'
           }}>
             {entry.text}
