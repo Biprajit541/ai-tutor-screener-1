@@ -30,39 +30,64 @@ export async function assessCandidate(sessionId) {
   return res.json()
 }
 
-// ── Browser-native TTS (free, no API needed) ──────────────────────────────────
 export function speakText(text, onEnd) {
   return new Promise((resolve) => {
+    // Cancel anything currently playing
     window.speechSynthesis.cancel()
-    const utt = new SpeechSynthesisUtterance(text)
 
-    // Pick a warm female voice if available
-    const voices = window.speechSynthesis.getVoices()
-    const preferred = voices.find(v =>
-      /female|woman|zira|samantha|karen|moira|victoria|fiona/i.test(v.name)
-    ) || voices.find(v => v.lang.startsWith('en')) || voices[0]
+    // Small pause after cancel before speaking
+    setTimeout(() => {
+      const utt = new SpeechSynthesisUtterance(text)
 
-    if (preferred) utt.voice = preferred
-    utt.rate = 0.92
-    utt.pitch = 1.05
-    utt.volume = 1
+      const voices = window.speechSynthesis.getVoices()
+      const preferred = voices.find(v =>
+        /female|woman|zira|samantha|karen|moira|victoria|fiona/i.test(v.name)
+      ) || voices.find(v => v.lang.startsWith('en')) || voices[0]
 
-    utt.onend = () => { onEnd?.(); resolve() }
-    utt.onerror = () => { onEnd?.(); resolve() }
-    window.speechSynthesis.speak(utt)
+      if (preferred) utt.voice = preferred
+      utt.rate = 0.92
+      utt.pitch = 1.05
+      utt.volume = 1
+
+      utt.onend = () => {
+        // Wait 1.2 seconds after speech ends before calling onEnd
+        // This ensures the sound fully clears the speakers before mic opens
+        setTimeout(() => {
+          onEnd?.()
+          resolve()
+        }, 1200)
+      }
+
+      utt.onerror = () => {
+        setTimeout(() => {
+          onEnd?.()
+          resolve()
+        }, 1200)
+      }
+
+      window.speechSynthesis.speak(utt)
+
+      // Chrome bug: sometimes onend never fires if tab loses focus
+      // Fallback: estimate duration and resolve anyway
+      const wordCount = text.split(' ').length
+      const estimatedMs = (wordCount / 2.5) * 1000 + 3000 // ~2.5 words/sec + buffer
+      setTimeout(() => {
+        if (window.speechSynthesis.speaking) return // still speaking, let onend handle it
+        onEnd?.()
+        resolve()
+      }, estimatedMs)
+
+    }, 150)
   })
 }
 
-// ── Browser-native STT (free, no API needed) ──────────────────────────────────
 export function createSpeechRecognizer(onResult, onEnd, onError) {
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition
   if (!SR) { onError('Speech recognition not supported. Please use Chrome.'); return null }
-
   const rec = new SR()
   rec.continuous = false
   rec.interimResults = true
   rec.lang = 'en-US'
-
   rec.onresult = (e) => {
     let interim = '', final = ''
     for (const r of e.results) {
