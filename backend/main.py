@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 from groq import Groq
 import httpx
 
-from models import SessionState, Message, Role, ChatRequest, AssessRequest
+from models import SessionState, ChatRequest, AssessRequest
 from interviewer import get_opening_message, SYSTEM_PROMPT
 from assessor import generate_assessment
 
