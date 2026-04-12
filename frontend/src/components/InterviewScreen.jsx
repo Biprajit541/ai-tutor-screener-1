@@ -4,8 +4,10 @@ import TranscriptPanel from './TranscriptPanel.jsx'
 import { useAudioRecorder } from '../hooks/useAudioRecorder.js'
 import { transcribeAudio, sendChatMessage, speakText, stopSpeaking } from '../utils/api.js'
 
-const SILENCE_THRESHOLD_MS = 2500
-const AUDIO_LOW_THRESHOLD  = 0.06
+// Raised threshold — background noise after suppression stays below 0.05
+// Real speech after smoothing hits 0.08+
+const SPEECH_THRESHOLD = 0.08
+const SILENCE_MS       = 2500
 
 export default function InterviewScreen({ session, onComplete }) {
   const { session_id, opening_message, candidate_name } = session
@@ -49,16 +51,23 @@ export default function InterviewScreen({ session, onComplete }) {
   // ── Silence detection ─────────────────────────────────────────────────────
 
   useEffect(() => {
-    if (!isRecording || phaseRef.current !== 'listening') return
+    if (!isRecording || phaseRef.current !== 'listening') {
+      clearSilenceTimers()
+      return
+    }
 
-    if (audioLevel > AUDIO_LOW_THRESHOLD) {
+    if (audioLevel > SPEECH_THRESHOLD) {
+      // Real speech detected
       speechStarted.current = true
       clearSilenceTimers()
       go(() => setSilenceWarn(false))
       return
     }
 
+    // Below threshold — only act after user has actually spoken
     if (!speechStarted.current) return
+
+    // Don't stack timers
     if (silenceTimerRef.current) return
 
     // Show warning at halfway
@@ -66,14 +75,15 @@ export default function InterviewScreen({ session, onComplete }) {
       if (phaseRef.current === 'listening' && mountedRef.current) {
         go(() => setSilenceWarn(true))
       }
-    }, SILENCE_THRESHOLD_MS / 2)
+    }, SILENCE_MS / 2)
 
     // Auto send after silence
     silenceTimerRef.current = setTimeout(() => {
       if (phaseRef.current === 'listening' && mountedRef.current) {
+        clearSilenceTimers()
         handleStopRecording()
       }
-    }, SILENCE_THRESHOLD_MS)
+    }, SILENCE_MS)
 
   }, [audioLevel, isRecording])
 
@@ -89,7 +99,6 @@ export default function InterviewScreen({ session, onComplete }) {
     })
     addLine('Aria', text)
 
-    // Use browser TTS — free and always works
     await speakText(text)
 
     if (!mountedRef.current) return
@@ -133,7 +142,7 @@ export default function InterviewScreen({ session, onComplete }) {
     }
   }
 
-  // ── Stop → transcribe → send ──────────────────────────────────────────────
+  // ── Stop → transcribe → AI ────────────────────────────────────────────────
 
   const handleStopRecording = async () => {
     if (phaseRef.current !== 'listening') return
@@ -208,7 +217,6 @@ export default function InterviewScreen({ session, onComplete }) {
       setPhaseAll('speaking')
       go(() => setStatusText('Aria is speaking...'))
 
-      // Wait for voices to load (Chrome loads them async)
       await new Promise(resolve => {
         if (window.speechSynthesis.getVoices().length > 0) {
           resolve()
@@ -217,7 +225,6 @@ export default function InterviewScreen({ session, onComplete }) {
             window.speechSynthesis.onvoiceschanged = null
             resolve()
           }
-          // Fallback if event never fires
           setTimeout(resolve, 2000)
         }
       })
@@ -307,7 +314,7 @@ export default function InterviewScreen({ session, onComplete }) {
       {/* Body */}
       <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
 
-        {/* Left */}
+        {/* Left — Orb */}
         <div style={{
           width: 270, flexShrink: 0, display: 'flex', flexDirection: 'column',
           alignItems: 'center', justifyContent: 'center', padding: '1.5rem 1rem',
@@ -318,20 +325,31 @@ export default function InterviewScreen({ session, onComplete }) {
 
           <p style={{
             fontSize: 12, fontWeight: 500, marginTop: '1.1rem',
-            color: phase === 'listening' ? '#6ff7b8' : phase === 'thinking' ? '#f7a26f' : 'var(--text-secondary)',
+            color: phase === 'listening' ? '#6ff7b8'
+              : phase === 'thinking' ? '#f7a26f'
+              : 'var(--text-secondary)',
             transition: 'color 0.3s', textAlign: 'center', minHeight: 18
           }}>
             {statusText}
           </p>
 
           {silenceWarn && phase === 'listening' && (
-            <div style={{ width: 120, height: 3, borderRadius: 2, marginTop: 6, background: 'var(--bg-elevated)', overflow: 'hidden' }}>
-              <div style={{ height: '100%', background: '#f7a26f', borderRadius: 2, animation: 'shrink 1.25s linear forwards' }} />
+            <div style={{
+              width: 120, height: 3, borderRadius: 2, marginTop: 6,
+              background: 'var(--bg-elevated)', overflow: 'hidden'
+            }}>
+              <div style={{
+                height: '100%', background: '#f7a26f', borderRadius: 2,
+                animation: 'shrink 1.25s linear forwards'
+              }} />
             </div>
           )}
 
           {errorMsg && (
-            <p style={{ fontSize: 11, color: '#f76f6f', textAlign: 'center', maxWidth: 210, marginTop: 8, lineHeight: 1.5 }}>
+            <p style={{
+              fontSize: 11, color: '#f76f6f', textAlign: 'center',
+              maxWidth: 210, marginTop: 8, lineHeight: 1.5
+            }}>
               {errorMsg}
             </p>
           )}
@@ -345,7 +363,8 @@ export default function InterviewScreen({ session, onComplete }) {
               cursor: phase === 'thinking' ? 'not-allowed' : 'pointer',
               boxShadow: phase === 'listening'
                 ? '0 0 0 10px rgba(111,247,184,0.12), 0 0 0 20px rgba(111,247,184,0.05)'
-                : phase === 'thinking' ? 'none' : '0 5px 24px rgba(124,111,247,0.4)',
+                : phase === 'thinking' ? 'none'
+                : '0 5px 24px rgba(124,111,247,0.4)',
               transition: 'all 0.22s cubic-bezier(0.34,1.56,0.64,1)',
               transform: phase === 'listening' ? 'scale(1.08)' : 'scale(1)',
               display: 'flex', alignItems: 'center', justifyContent: 'center',
@@ -364,7 +383,10 @@ export default function InterviewScreen({ session, onComplete }) {
             </svg>
           </button>
 
-          <p style={{ marginTop: '0.5rem', fontSize: 10, color: 'var(--text-muted)', textAlign: 'center', lineHeight: 1.5 }}>
+          <p style={{
+            marginTop: '0.5rem', fontSize: 10,
+            color: 'var(--text-muted)', textAlign: 'center', lineHeight: 1.5
+          }}>
             {phase === 'listening' ? 'Tap to send · auto-sends after silence'
             : phase === 'thinking'  ? 'Processing...'
             : phase === 'speaking'  ? 'Tap to interrupt'
@@ -376,7 +398,8 @@ export default function InterviewScreen({ session, onComplete }) {
         <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
           <div style={{
             padding: '0.55rem 1.25rem', borderBottom: '1px solid var(--border-subtle)',
-            fontSize: 9, color: 'var(--text-muted)', fontWeight: 700, letterSpacing: '0.1em', flexShrink: 0
+            fontSize: 9, color: 'var(--text-muted)', fontWeight: 700,
+            letterSpacing: '0.1em', flexShrink: 0
           }}>
             LIVE TRANSCRIPT
           </div>
