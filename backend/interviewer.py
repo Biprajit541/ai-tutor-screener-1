@@ -32,15 +32,6 @@ Rules:
 - Keep responses under 80 words. This is a spoken conversation.
 """
 
-def build_messages(session_state) -> list:
-    history = []
-    for msg in session_state.messages:
-        history.append({
-            "role": "user" if msg.role.value == "user" else "model",
-            "parts": [msg.content]
-        })
-    return history
-
 def get_opening_message(candidate_name: str) -> str:
     return (
         f"Hi {candidate_name}! I'm Aria, and I'll be your interviewer today on behalf of Cuemath. "
