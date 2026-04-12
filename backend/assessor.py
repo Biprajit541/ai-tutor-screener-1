@@ -115,7 +115,6 @@ def fix_report(result: dict, has_content: bool, interview_complete: bool) -> dic
 
     result["dimensions"] = dims
 
-    # Recalculate overall_score from actual dimension scores
     weights = {
         "communication_clarity":  0.20,
         "warmth_empathy":         0.25,
@@ -129,7 +128,6 @@ def fix_report(result: dict, has_content: bool, interview_complete: bool) -> dic
     if not has_content:
         result["overall_score"] = min(result["overall_score"], 3)
 
-    # ── Key rule: Advance ONLY if interview fully completed ───────────────────
     score = result["overall_score"]
 
     if not has_content:
@@ -139,7 +137,6 @@ def fix_report(result: dict, has_content: bool, interview_complete: bool) -> dic
             "A full interview must be completed before any assessment can be made."
         )
     elif not interview_complete:
-        # Interview was ended early — cap at Hold regardless of scores
         if score >= 7:
             result["recommendation"] = "Hold"
             result["recommendation_reason"] = (
@@ -158,14 +155,12 @@ def fix_report(result: dict, has_content: bool, interview_complete: bool) -> dic
                 "The candidate did not complete the interview and responses were insufficient. "
                 "A complete interview is required for proper evaluation."
             )
-        # Add concern about incomplete interview
         concerns = result.get("concerns", [])
         if not isinstance(concerns, list):
             concerns = []
         concerns.insert(0, "Interview was not fully completed — not all questions were answered.")
         result["concerns"] = concerns
     else:
-        # Interview was fully completed — score normally
         if score >= 7:
             result["recommendation"] = "Advance"
         elif score >= 5:
@@ -222,7 +217,6 @@ async def generate_assessment(
         result["interview_complete"] = interview_complete
         return result
 
-    # Add interview completion context to the prompt
     completion_note = (
         "NOTE: The candidate completed all interview questions."
         if interview_complete else
@@ -274,7 +268,7 @@ Return the JSON assessment now:"""
         return result
 
     except Exception as e:
-        print(f"Assessment error: {e}")
+        print(f"Assessment error: {type(e).__name__}")  # only logs error type, not content
         result = {
             "dimensions": {
                 key: {"score": 1, "label": label, "evidence": "Assessment could not be completed.", "verdict": "Weak"}
