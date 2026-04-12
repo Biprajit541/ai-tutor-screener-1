@@ -20,11 +20,11 @@ export default class ErrorBoundary extends React.Component {
         <div style={{
           minHeight: '100vh', display: 'flex', flexDirection: 'column',
           alignItems: 'center', justifyContent: 'center', gap: 16,
-          background: '#0a0a12', color: '#f0effe', fontFamily: 'DM Sans, sans-serif',
-          padding: '2rem', textAlign: 'center'
+          background: '#0a0a12', color: '#f0effe',
+          fontFamily: 'DM Sans, sans-serif', padding: '2rem', textAlign: 'center'
         }}>
           <div style={{ fontSize: 40 }}>⚠️</div>
-          <h2 style={{ fontFamily: 'Sora, sans-serif', fontSize: '1.4rem' }}>
+          <h2 style={{ fontFamily: 'Sora, sans-serif', fontSize: '1.4rem', fontWeight: 600 }}>
             Something went wrong
           </h2>
           <p style={{ color: '#9b99bc', fontSize: 14, maxWidth: 400 }}>
@@ -35,15 +35,11 @@ export default class ErrorBoundary extends React.Component {
             style={{
               marginTop: 8, padding: '12px 28px', borderRadius: 12,
               background: 'linear-gradient(135deg, #7c6ff7, #5b4bd8)',
-              color: '#fff', fontSize: 15, fontWeight: 600,
-              border: 'none', cursor: 'pointer'
+              color: '#fff', fontSize: 15, fontWeight: 600, border: 'none', cursor: 'pointer'
             }}
           >
             Restart Interview
           </button>
-          <p style={{ fontSize: 11, color: '#5a5878', marginTop: 8 }}>
-            Error details in browser console (F12)
-          </p>
         </div>
       )
     }
