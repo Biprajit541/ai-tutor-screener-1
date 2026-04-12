@@ -12,10 +12,14 @@ export function useAudioRecorder({ onSilence, silenceMs = 2500, speechThreshold 
   const animRef          = useRef(null)
   const intervalRef      = useRef(null)
   const activeRef        = useRef(false)
-  const smoothedLevel    = useRef(0)
+  const smoothedRef      = useRef(0)
   const speechDetected   = useRef(false)
   const silenceStart     = useRef(null)
   const silenceFired     = useRef(false)
+  const onSilenceRef     = useRef(onSilence)
+
+  // Keep onSilence ref current without causing re-renders
+  onSilenceRef.current = onSilence
 
   const startRecording = useCallback(async () => {
     if (activeRef.current) return
@@ -29,12 +33,13 @@ export function useAudioRecorder({ onSilence, silenceMs = 2500, speechThreshold 
       },
       video: false
     })
-    streamRef.current = stream
-    activeRef.current = true
+
+    streamRef.current    = stream
+    activeRef.current    = true
     speechDetected.current = false
     silenceStart.current = null
     silenceFired.current = false
-    smoothedLevel.current = 0
+    smoothedRef.current  = 0
 
     const ctx = new AudioContext()
     ctxRef.current = ctx
@@ -45,41 +50,38 @@ export function useAudioRecorder({ onSilence, silenceMs = 2500, speechThreshold 
     source.connect(analyser)
     analyserRef.current = analyser
 
-    // Animation frame for visual level only
+    // Visual level via requestAnimationFrame
     const tick = () => {
       if (!activeRef.current) return
       const data = new Uint8Array(analyser.frequencyBinCount)
       analyser.getByteFrequencyData(data)
-      const speechBins = Array.from(data).slice(10, 110)
-      const raw = speechBins.reduce((a, b) => a + b, 0) / speechBins.length / 128
-      smoothedLevel.current = smoothedLevel.current * 0.85 + raw * 0.15
-      setAudioLevel(smoothedLevel.current)
+      // Speech frequency bins only (300Hz-3400Hz)
+      const bins = Array.from(data).slice(10, 110)
+      const raw = bins.reduce((a, b) => a + b, 0) / bins.length / 128
+      smoothedRef.current = smoothedRef.current * 0.85 + raw * 0.15
+      setAudioLevel(smoothedRef.current)
       animRef.current = requestAnimationFrame(tick)
     }
     tick()
 
-    // Separate interval for silence detection — not affected by React batching
+    // Silence detection via setInterval — independent of React renders
     intervalRef.current = setInterval(() => {
       if (!activeRef.current) return
-      const level = smoothedLevel.current
+      const level = smoothedRef.current
 
       if (level > speechThreshold) {
-        // Speech detected
         speechDetected.current = true
-        silenceStart.current = null
-      } else if (speechDetected.current) {
-        // Below threshold after speech — start silence timer
+        silenceStart.current   = null
+        silenceFired.current   = false
+      } else if (speechDetected.current && !silenceFired.current) {
         if (silenceStart.current === null) {
           silenceStart.current = Date.now()
-        } else {
-          const elapsed = Date.now() - silenceStart.current
-          if (elapsed >= silenceMs && !silenceFired.current) {
-            silenceFired.current = true
-            onSilence?.()
-          }
+        } else if (Date.now() - silenceStart.current >= silenceMs) {
+          silenceFired.current = true
+          try { onSilenceRef.current?.() } catch(e) { console.error(e) }
         }
       }
-    }, 100) // check every 100ms
+    }, 100)
 
     chunksRef.current = []
     const mr = new MediaRecorder(stream, { mimeType: 'audio/webm' })
@@ -87,21 +89,18 @@ export function useAudioRecorder({ onSilence, silenceMs = 2500, speechThreshold 
     mr.start(250)
     mediaRecorderRef.current = mr
     setIsRecording(true)
-  }, [onSilence, silenceMs, speechThreshold])
+  }, [silenceMs, speechThreshold])
 
   const stopRecording = useCallback(() => {
     return new Promise((resolve) => {
-      if (!activeRef.current && chunksRef.current.length === 0) {
-        resolve(null)
-        return
-      }
-      activeRef.current = false
+      activeRef.current      = false
+      speechDetected.current = false
+      silenceStart.current   = null
+      silenceFired.current   = false
+
       cancelAnimationFrame(animRef.current)
       clearInterval(intervalRef.current)
-      smoothedLevel.current = 0
-      speechDetected.current = false
-      silenceStart.current = null
-      silenceFired.current = false
+      smoothedRef.current = 0
       setAudioLevel(0)
 
       const finish = () => {
@@ -110,7 +109,9 @@ export function useAudioRecorder({ onSilence, silenceMs = 2500, speechThreshold 
         try { ctxRef.current?.close() } catch {}
         ctxRef.current = null
         setIsRecording(false)
-        const blob = new Blob(chunksRef.current, { type: 'audio/webm' })
+        const blob = chunksRef.current.length > 0
+          ? new Blob(chunksRef.current, { type: 'audio/webm' })
+          : null
         chunksRef.current = []
         resolve(blob)
       }
