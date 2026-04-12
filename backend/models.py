@@ -1,19 +1,10 @@
 from pydantic import BaseModel
 from typing import List
-from enum import Enum
-
-class Role(str, Enum):
-    assistant = "assistant"
-    user = "user"
-
-class Message(BaseModel):
-    role: Role
-    content: str
 
 class SessionState(BaseModel):
     session_id: str
     candidate_name: str
-    messages: List[Message] = []
+    messages: List[dict] = []
     question_count: int = 0
     is_complete: bool = False
     transcript: List[dict] = []
