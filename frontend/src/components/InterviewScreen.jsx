@@ -4,6 +4,9 @@ import TranscriptPanel from './TranscriptPanel.jsx'
 import { useAudioRecorder } from '../hooks/useAudioRecorder.js'
 import { transcribeAudio, sendChatMessage, speakText, stopSpeaking } from '../utils/api.js'
 
+const SILENCE_MS  = 4000   // 4 seconds of silence triggers auto-send
+const SPEECH_MIN  = 0.008  // minimum level to count as speech (very low)
+
 export default function InterviewScreen({ session, onComplete }) {
   const { session_id, opening_message, candidate_name } = session
 
@@ -15,12 +18,18 @@ export default function InterviewScreen({ session, onComplete }) {
   const [errorMsg, setErrorMsg]       = useState('')
   const [silenceWarn, setSilenceWarn] = useState(false)
 
-  const transcriptRef    = useRef([{ speaker: 'Aria', text: String(opening_message || '') }])
-  const phaseRef         = useRef('speaking')
-  const mountedRef       = useRef(true)
-  const processingRef    = useRef(false)
-  const stopRecordingRef = useRef(null)
-  const ariaSpeakRef     = useRef(null)
+  const transcriptRef  = useRef([{ speaker: 'Aria', text: String(opening_message || '') }])
+  const phaseRef       = useRef('speaking')
+  const mountedRef     = useRef(true)
+  const processingRef  = useRef(false)
+  const ariaSpeakRef   = useRef(null)
+
+  // Silence detection state — all in refs, no React state
+  const hasSpeech      = useRef(false)   // did user speak at least once?
+  const silenceTimer   = useRef(null)    // the auto-send setTimeout
+  const warnTimer      = useRef(null)    // the warning setTimeout
+
+  const { isRecording, audioLevel, startRecording, stopRecording } = useAudioRecorder()
 
   const go = (fn) => { if (mountedRef.current) try { fn() } catch(e) { console.error(e) } }
   const setPhaseAll = (p) => { phaseRef.current = p; go(() => setPhase(p)) }
@@ -33,18 +42,68 @@ export default function InterviewScreen({ session, onComplete }) {
     go(() => setTranscript([...transcriptRef.current]))
   }
 
+  const clearSilenceTimers = () => {
+    clearTimeout(silenceTimer.current)
+    clearTimeout(warnTimer.current)
+    silenceTimer.current = null
+    warnTimer.current    = null
+  }
+
+  // ── Silence detection via audioLevel ─────────────────────────────────────
+  // This useEffect runs every time audioLevel changes (every animation frame)
+  // All logic uses refs so there are zero stale closure issues
+
+  useEffect(() => {
+    if (!isRecording || phaseRef.current !== 'listening') return
+
+    if (audioLevel > SPEECH_MIN) {
+      // Sound detected — user is speaking
+      hasSpeech.current = true
+      clearSilenceTimers()
+      go(() => setSilenceWarn(false))
+      return
+    }
+
+    // Below threshold — silence
+    // Only start timer if user has spoken at least once
+    if (!hasSpeech.current) return
+
+    // Don't restart timer if already running
+    if (silenceTimer.current) return
+
+    // Show warning at halfway point
+    warnTimer.current = setTimeout(() => {
+      if (phaseRef.current === 'listening' && mountedRef.current) {
+        go(() => setSilenceWarn(true))
+      }
+    }, SILENCE_MS / 2)
+
+    // Auto send after SILENCE_MS
+    silenceTimer.current = setTimeout(() => {
+      if (phaseRef.current !== 'listening' || !mountedRef.current) return
+      console.log('Auto-send triggered after silence')
+      clearSilenceTimers()
+      handleStopRecording()
+    }, SILENCE_MS)
+
+  }, [audioLevel, isRecording])
+
   // ── handleStopRecording ───────────────────────────────────────────────────
 
-  const handleStopRecording = useCallback(async () => {
+  const handleStopRecording = async () => {
     if (phaseRef.current !== 'listening') return
     if (processingRef.current) return
     processingRef.current = true
 
+    clearSilenceTimers()
+    hasSpeech.current = false
+    go(() => setSilenceWarn(false))
+
     setPhaseAll('thinking')
-    go(() => { setStatusText('Processing your answer...'); setSilenceWarn(false) })
+    go(() => setStatusText('Processing your answer...'))
 
     try {
-      const blob = await stopRecordingRef.current?.()
+      const blob = await stopRecording()
 
       if (!blob || blob.size < 1000) {
         processingRef.current = false
@@ -91,28 +150,7 @@ export default function InterviewScreen({ session, onComplete }) {
         setStatusText('Tap mic to retry')
       })
     }
-  }, [session_id, candidate_name])
-
-  // ── onSilence — called by setInterval inside hook ─────────────────────────
-
-  const onSilence = useCallback(() => {
-    console.log('onSilence fired — phase:', phaseRef.current)
-    if (phaseRef.current !== 'listening') return
-    if (processingRef.current) return
-    go(() => setSilenceWarn(false))
-    handleStopRecording()
-  }, [handleStopRecording])
-
-  // ── Hook ──────────────────────────────────────────────────────────────────
-
-  const { isRecording, audioLevel, startRecording, stopRecording } = useAudioRecorder({
-    onSilence,
-    silenceMs: 4000
-  })
-
-  useEffect(() => {
-    stopRecordingRef.current = stopRecording
-  }, [stopRecording])
+  }
 
   // ── ariaSpeak ─────────────────────────────────────────────────────────────
 
@@ -147,6 +185,8 @@ export default function InterviewScreen({ session, onComplete }) {
     if (phaseRef.current === 'listening') return
     if (processingRef.current) return
 
+    clearSilenceTimers()
+    hasSpeech.current = false
     go(() => setSilenceWarn(false))
     setPhaseAll('listening')
     go(() => { setStatusText('Listening — speak your answer'); setErrorMsg('') })
@@ -173,6 +213,7 @@ export default function InterviewScreen({ session, onComplete }) {
       if (!mountedRef.current) return
       setPhaseAll('speaking')
       go(() => setStatusText('Aria is speaking...'))
+
       await new Promise(resolve => {
         if (window.speechSynthesis.getVoices().length > 0) { resolve() }
         else {
@@ -183,6 +224,7 @@ export default function InterviewScreen({ session, onComplete }) {
           setTimeout(resolve, 2000)
         }
       })
+
       await speakText(opening_message || '')
       if (mountedRef.current) startListening()
     }
@@ -191,6 +233,7 @@ export default function InterviewScreen({ session, onComplete }) {
 
     return () => {
       mountedRef.current = false
+      clearSilenceTimers()
       stopSpeaking()
       try { stopRecording() } catch {}
     }
@@ -205,12 +248,16 @@ export default function InterviewScreen({ session, onComplete }) {
       setTimeout(() => { if (mountedRef.current) startListening() }, 200)
       return
     }
-    if (phaseRef.current === 'listening') { handleStopRecording(); return }
+    if (phaseRef.current === 'listening') {
+      handleStopRecording()
+      return
+    }
     startListening()
   }
 
   const handleFinish = () => {
     stopSpeaking()
+    clearSilenceTimers()
     try { stopRecording() } catch {}
     onComplete(session_id, transcriptRef.current)
   }
@@ -280,13 +327,22 @@ export default function InterviewScreen({ session, onComplete }) {
           </p>
 
           {silenceWarn && phase === 'listening' && (
-            <div style={{ width: 120, height: 3, borderRadius: 2, marginTop: 6, background: 'var(--bg-elevated)', overflow: 'hidden' }}>
-              <div style={{ height: '100%', background: '#f7a26f', borderRadius: 2, animation: 'shrink 2s linear forwards' }} />
+            <div style={{
+              width: 120, height: 3, borderRadius: 2, marginTop: 6,
+              background: 'var(--bg-elevated)', overflow: 'hidden'
+            }}>
+              <div style={{
+                height: '100%', background: '#f7a26f', borderRadius: 2,
+                animation: 'shrink 2s linear forwards'
+              }} />
             </div>
           )}
 
           {errorMsg && (
-            <p style={{ fontSize: 11, color: '#f76f6f', textAlign: 'center', maxWidth: 210, marginTop: 8, lineHeight: 1.5 }}>
+            <p style={{
+              fontSize: 11, color: '#f76f6f', textAlign: 'center',
+              maxWidth: 210, marginTop: 8, lineHeight: 1.5
+            }}>
               {errorMsg}
             </p>
           )}
@@ -320,7 +376,10 @@ export default function InterviewScreen({ session, onComplete }) {
             </svg>
           </button>
 
-          <p style={{ marginTop: '0.5rem', fontSize: 10, color: 'var(--text-muted)', textAlign: 'center', lineHeight: 1.5 }}>
+          <p style={{
+            marginTop: '0.5rem', fontSize: 10,
+            color: 'var(--text-muted)', textAlign: 'center', lineHeight: 1.5
+          }}>
             {phase === 'listening' ? 'Tap to send · auto-sends after 4s silence'
             : phase === 'thinking'  ? 'Processing...'
             : phase === 'speaking'  ? 'Tap to interrupt'
@@ -331,7 +390,8 @@ export default function InterviewScreen({ session, onComplete }) {
         <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
           <div style={{
             padding: '0.55rem 1.25rem', borderBottom: '1px solid var(--border-subtle)',
-            fontSize: 9, color: 'var(--text-muted)', fontWeight: 700, letterSpacing: '0.1em', flexShrink: 0
+            fontSize: 9, color: 'var(--text-muted)', fontWeight: 700,
+            letterSpacing: '0.1em', flexShrink: 0
           }}>
             LIVE TRANSCRIPT
           </div>
