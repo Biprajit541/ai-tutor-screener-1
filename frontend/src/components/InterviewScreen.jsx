@@ -4,8 +4,8 @@ import TranscriptPanel from './TranscriptPanel.jsx'
 import { useAudioRecorder } from '../hooks/useAudioRecorder.js'
 import { transcribeAudio, sendChatMessage, speakText } from '../utils/api.js'
 
-const SILENCE_THRESHOLD = 0.04
-const SILENCE_FRAMES    = 150
+const SILENCE_THRESHOLD = 0.03
+const SILENCE_FRAMES    = 180  // 3 seconds at ~60fps
 
 export default function InterviewScreen({ session, onComplete }) {
   const { session_id, opening_message, candidate_name } = session
@@ -24,14 +24,20 @@ export default function InterviewScreen({ session, onComplete }) {
   const currentAudioRef = useRef(null)
   const silenceCount    = useRef(0)
   const processingRef   = useRef(false)
+  const listenLock      = useRef(false)
 
   const { isRecording, audioLevel, startRecording, stopRecording } = useAudioRecorder()
 
   // ── Helpers ───────────────────────────────────────────────────────────────
 
-  const go = (fn) => { if (mountedRef.current) try { fn() } catch(e) { console.error(e) } }
+  const go = (fn) => {
+    if (mountedRef.current) try { fn() } catch(e) { console.error(e) }
+  }
 
-  const setPhaseAll = (p) => { phaseRef.current = p; go(() => setPhase(p)) }
+  const setPhaseAll = (p) => {
+    phaseRef.current = p
+    go(() => setPhase(p))
+  }
 
   const addLine = (speaker, text) => {
     if (!speaker || !text) return
@@ -43,7 +49,10 @@ export default function InterviewScreen({ session, onComplete }) {
 
   const stopCurrentAudio = () => {
     if (currentAudioRef.current) {
-      try { currentAudioRef.current.pause(); currentAudioRef.current.src = '' } catch {}
+      try {
+        currentAudioRef.current.pause()
+        currentAudioRef.current.src = ''
+      } catch {}
       currentAudioRef.current = null
     }
   }
@@ -58,33 +67,80 @@ export default function InterviewScreen({ session, onComplete }) {
       return
     }
     silenceCount.current += 1
-    if (silenceCount.current === 120) go(() => setSilenceWarn(true))
+    if (silenceCount.current === 140) go(() => setSilenceWarn(true))
     if (silenceCount.current >= SILENCE_FRAMES) {
       silenceCount.current = 0
       handleStopRecording()
     }
   }, [audioLevel, isRecording])
 
+  // ── Play Aria audio and wait for it to FULLY finish ───────────────────────
+
+  const playAndWait = (audioB64) => {
+    return new Promise((resolve) => {
+      stopCurrentAudio()
+      const audio = new Audio(`data:audio/mp3;base64,${audioB64}`)
+      currentAudioRef.current = audio
+
+      let resolved = false
+      const done = () => {
+        if (resolved) return
+        resolved = true
+        currentAudioRef.current = null
+        // 600ms gap after audio ends before mic opens — prevents echo
+        setTimeout(resolve, 600)
+      }
+
+      audio.onended = done
+      audio.onerror = done
+
+      // Fallback timer based on estimated duration
+      audio.onloadedmetadata = () => {
+        const ms = (audio.duration * 1000) + 800
+        setTimeout(done, ms)
+      }
+
+      // Hard fallback if metadata never loads — 30 seconds max
+      setTimeout(done, 30000)
+
+      audio.play().catch(done)
+    })
+  }
+
   // ── Aria speaks ───────────────────────────────────────────────────────────
 
   const ariaSpeak = async (text, isComplete) => {
     if (!mountedRef.current) return
     setPhaseAll('speaking')
-    go(() => { setStatusText('Aria is speaking...'); setErrorMsg(''); setSilenceWarn(false) })
+    go(() => {
+      setStatusText('Aria is speaking...')
+      setErrorMsg('')
+      setSilenceWarn(false)
+    })
     addLine('Aria', text)
 
-    // Fetch and play audio
-    const audio = await speakText(text, () => {})
-    if (audio) currentAudioRef.current = audio
-
-    if (audio) {
-      await new Promise(resolve => {
-        const words = text.trim().split(/\s+/).length
-        const maxMs = Math.max((words / 2.5) * 1000 + 2000, 5000)
-        const fallback = setTimeout(resolve, maxMs)
-        audio.onended = () => { clearTimeout(fallback); resolve() }
-        audio.onerror = () => { clearTimeout(fallback); resolve() }
+    try {
+      // Get audio from backend
+      const res = await fetch(`${import.meta.env.VITE_API_URL || 'http://localhost:8000'}/tts`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text })
       })
+
+      if (res.ok) {
+        const { audio_b64 } = await res.json()
+        // Wait for audio to fully finish playing
+        await playAndWait(audio_b64)
+      } else {
+        // TTS failed — wait estimated time based on word count then continue
+        const words = text.trim().split(/\s+/).length
+        await new Promise(r => setTimeout(r, (words / 2.5) * 1000 + 1000))
+      }
+    } catch (err) {
+      console.error('ariaSpeak error:', err)
+      // Continue even if TTS fails — don't block the interview
+      const words = text.trim().split(/\s+/).length
+      await new Promise(r => setTimeout(r, (words / 2.5) * 1000 + 1000))
     }
 
     if (!mountedRef.current) return
@@ -96,7 +152,7 @@ export default function InterviewScreen({ session, onComplete }) {
         if (mountedRef.current) onComplete(session_id, transcriptRef.current)
       }, 1200)
     } else {
-      setTimeout(() => { if (mountedRef.current) startListening() }, 500)
+      startListening()
     }
   }
 
@@ -106,15 +162,28 @@ export default function InterviewScreen({ session, onComplete }) {
     if (!mountedRef.current) return
     if (phaseRef.current === 'listening') return
     if (processingRef.current) return
+    if (listenLock.current) return
 
+    listenLock.current = true
     silenceCount.current = 0
     setPhaseAll('listening')
-    go(() => { setStatusText('Listening — speak your answer'); setErrorMsg(''); setSilenceWarn(false) })
+    go(() => {
+      setStatusText('Listening — speak your answer')
+      setErrorMsg('')
+      setSilenceWarn(false)
+    })
 
     try {
       await startRecording()
-    } catch {
-      go(() => { setErrorMsg('Microphone access denied. Please allow mic and refresh.'); setPhaseAll('idle'); setStatusText('Mic error') })
+    } catch (err) {
+      console.error('startRecording error:', err)
+      go(() => {
+        setErrorMsg('Microphone access denied. Please allow mic and refresh.')
+        setPhaseAll('idle')
+        setStatusText('Mic error')
+      })
+    } finally {
+      listenLock.current = false
     }
   }
 
@@ -125,35 +194,44 @@ export default function InterviewScreen({ session, onComplete }) {
     if (processingRef.current) return
     processingRef.current = true
 
-    go(() => { setPhaseAll('thinking'); setStatusText('Transcribing...'); setSilenceWarn(false) })
+    go(() => {
+      setPhaseAll('thinking')
+      setStatusText('Transcribing...')
+      setSilenceWarn(false)
+    })
 
     try {
       const blob = await stopRecording()
 
-      if (!blob || blob.size < 3000) {
+      // Accept blobs larger than 500 bytes — be lenient
+      if (!blob || blob.size < 500) {
         processingRef.current = false
         go(() => setErrorMsg("Didn't hear anything — listening again."))
         setTimeout(() => { if (mountedRef.current) startListening() }, 800)
         return
       }
 
+      // Transcribe
+      go(() => setStatusText('Transcribing...'))
       const { text } = await transcribeAudio(blob)
       if (!mountedRef.current) return
 
       const clean = (text || '').trim()
-      if (!clean || clean.length < 2) {
+      if (!clean) {
         processingRef.current = false
         go(() => setErrorMsg("Didn't catch that — please try again."))
         setTimeout(() => { if (mountedRef.current) startListening() }, 800)
         return
       }
 
+      // Send to AI
       go(() => setStatusText('Aria is thinking...'))
       addLine(String(candidate_name || 'You'), clean)
 
       const result = await sendChatMessage(session_id, clean)
       if (!mountedRef.current) return
-      if (!result?.reply) throw new Error('No reply received')
+
+      if (!result?.reply) throw new Error('No reply received from AI')
 
       processingRef.current = false
       await ariaSpeak(result.reply, result.is_complete)
@@ -163,36 +241,44 @@ export default function InterviewScreen({ session, onComplete }) {
       if (!mountedRef.current) return
       processingRef.current = false
       go(() => {
-        setErrorMsg(`Error: ${err.message || 'Something went wrong'} — tap mic to retry`)
+        setErrorMsg(`Something went wrong — tap mic to retry`)
         setPhaseAll('idle')
-        setStatusText('Something went wrong')
+        setStatusText('Error — tap mic to retry')
       })
     }
   }
 
-  // ── Mount ─────────────────────────────────────────────────────────────────
+  // ── Mount: play opening then listen ──────────────────────────────────────
 
   useEffect(() => {
     mountedRef.current  = true
     processingRef.current = false
+    listenLock.current  = false
 
     const begin = async () => {
       if (!mountedRef.current) return
-      const audio = await speakText(opening_message || '', () => {})
-      if (audio) currentAudioRef.current = audio
-
-      if (audio) {
-        await new Promise(resolve => {
-          const words = (opening_message || '').trim().split(/\s+/).length
-          const fallback = setTimeout(resolve, Math.max((words / 2.5) * 1000 + 2000, 5000))
-          audio.onended = () => { clearTimeout(fallback); resolve() }
-          audio.onerror = () => { clearTimeout(fallback); resolve() }
+      try {
+        const res = await fetch(`${import.meta.env.VITE_API_URL || 'http://localhost:8000'}/tts`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text: opening_message })
         })
+        if (res.ok) {
+          const { audio_b64 } = await res.json()
+          await playAndWait(audio_b64)
+        } else {
+          const words = (opening_message || '').trim().split(/\s+/).length
+          await new Promise(r => setTimeout(r, (words / 2.5) * 1000 + 1000))
+        }
+      } catch (err) {
+        console.error('Opening TTS error:', err)
+        const words = (opening_message || '').trim().split(/\s+/).length
+        await new Promise(r => setTimeout(r, (words / 2.5) * 1000 + 1000))
       }
       if (mountedRef.current) startListening()
     }
 
-    setTimeout(begin, 400)
+    setTimeout(begin, 500)
 
     return () => {
       mountedRef.current = false
@@ -201,16 +287,20 @@ export default function InterviewScreen({ session, onComplete }) {
     }
   }, [])
 
-  // ── Mic button tap ────────────────────────────────────────────────────────
+  // ── Manual mic tap ────────────────────────────────────────────────────────
 
   const handleMicTap = () => {
     if (phaseRef.current === 'thinking') return
     if (phaseRef.current === 'speaking') {
       stopCurrentAudio()
+      setPhaseAll('idle')
       setTimeout(() => { if (mountedRef.current) startListening() }, 200)
       return
     }
-    if (phaseRef.current === 'listening') { handleStopRecording(); return }
+    if (phaseRef.current === 'listening') {
+      handleStopRecording()
+      return
+    }
     startListening()
   }
 
@@ -279,7 +369,9 @@ export default function InterviewScreen({ session, onComplete }) {
 
           <p style={{
             fontSize: 12, fontWeight: 500, marginTop: '1.1rem',
-            color: phase === 'listening' ? '#6ff7b8' : phase === 'thinking' ? '#f7a26f' : 'var(--text-secondary)',
+            color: phase === 'listening' ? '#6ff7b8'
+              : phase === 'thinking' ? '#f7a26f'
+              : 'var(--text-secondary)',
             transition: 'color 0.3s', textAlign: 'center', minHeight: 18
           }}>
             {statusText}
@@ -290,12 +382,18 @@ export default function InterviewScreen({ session, onComplete }) {
               width: 120, height: 3, borderRadius: 2, marginTop: 6,
               background: 'var(--bg-elevated)', overflow: 'hidden'
             }}>
-              <div style={{ height: '100%', background: '#f7a26f', borderRadius: 2, animation: 'shrink 0.5s linear forwards' }} />
+              <div style={{
+                height: '100%', background: '#f7a26f', borderRadius: 2,
+                animation: 'shrink 1s linear forwards'
+              }} />
             </div>
           )}
 
           {errorMsg && (
-            <p style={{ fontSize: 11, color: '#f76f6f', textAlign: 'center', maxWidth: 210, marginTop: 8, lineHeight: 1.5 }}>
+            <p style={{
+              fontSize: 11, color: '#f76f6f', textAlign: 'center',
+              maxWidth: 210, marginTop: 8, lineHeight: 1.5
+            }}>
               {errorMsg}
             </p>
           )}
@@ -330,7 +428,10 @@ export default function InterviewScreen({ session, onComplete }) {
             </svg>
           </button>
 
-          <p style={{ marginTop: '0.5rem', fontSize: 10, color: 'var(--text-muted)', textAlign: 'center', lineHeight: 1.5 }}>
+          <p style={{
+            marginTop: '0.5rem', fontSize: 10,
+            color: 'var(--text-muted)', textAlign: 'center', lineHeight: 1.5
+          }}>
             {phase === 'listening' ? 'Tap to send · auto-sends on silence'
             : phase === 'thinking'  ? 'Processing...'
             : phase === 'speaking'  ? 'Tap to interrupt'
@@ -360,7 +461,7 @@ export default function InterviewScreen({ session, onComplete }) {
         flexShrink: 0, background: 'var(--bg-card)'
       }}>
         <p style={{ fontSize: 10, color: 'var(--text-muted)' }}>
-          4–5 questions · mic opens automatically · works best on Chrome
+          4–5 questions · mic opens automatically · use Chrome
         </p>
         <button
           onClick={handleFinish}
