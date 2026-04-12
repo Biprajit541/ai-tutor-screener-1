@@ -1,15 +1,12 @@
 import os
 import uuid
-import base64
 import tempfile
-import asyncio
 from typing import Dict
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
-import google.generativeai as genai
 from groq import Groq
-import edge_tts
+import httpx
 
 from models import SessionState, Message, Role, ChatRequest, AssessRequest
 from interviewer import get_opening_message, SYSTEM_PROMPT
@@ -27,11 +24,56 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+GEMINI_URL = "https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent"
 
 sessions: Dict[str, SessionState] = {}
 websocket_connections: Dict[str, WebSocket] = {}
+
+# ── Gemini REST helper ────────────────────────────────────────────────────────
+
+async def call_gemini(messages: list, system: str = "") -> str:
+    """Call Gemini v1 REST API directly — bypasses broken Python library."""
+    contents = []
+
+    if system:
+        # Inject system prompt as first user message (Gemini v1 doesn't have system role)
+        contents.append({
+            "role": "user",
+            "parts": [{"text": f"[System Instructions]\n{system}\n\n[Begin Interview]"}]
+        })
+        contents.append({
+            "role": "model",
+            "parts": [{"text": "Understood. I am ready to begin the interview as Aria."}]
+        })
+
+    for msg in messages:
+        role = "user" if msg["role"] == "user" else "model"
+        contents.append({"role": role, "parts": [{"text": msg["content"]}]})
+
+    payload = {
+        "contents": contents,
+        "generationConfig": {
+            "temperature": 0.75,
+            "maxOutputTokens": 300,
+            "stopSequences": []
+        }
+    }
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.post(
+            f"{GEMINI_URL}?key={GEMINI_API_KEY}",
+            json=payload
+        )
+        if not resp.is_success:
+            raise HTTPException(500, f"Gemini API error: {resp.status_code} {resp.text}")
+        data = resp.json()
+
+    try:
+        return data["candidates"][0]["content"]["parts"][0]["text"].strip()
+    except (KeyError, IndexError) as e:
+        raise HTTPException(500, f"Unexpected Gemini response: {data}")
 
 # ── Session ───────────────────────────────────────────────────────────────────
 
@@ -45,7 +87,7 @@ async def start_session(body: dict):
     session = SessionState(
         session_id=session_id,
         candidate_name=candidate_name,
-        messages=[Message(role=Role.assistant, content=opening)],
+        messages=[{"role": "model", "content": opening}],
         transcript=[{"speaker": "Aria", "text": opening}]
     )
     sessions[session_id] = session
@@ -82,8 +124,7 @@ async def transcribe(
                     language="en",
                     response_format="text"
                 )
-            text = str(transcription).strip()
-            return {"text": text}
+            return {"text": str(transcription).strip()}
         finally:
             try: os.unlink(tmp_path)
             except: pass
@@ -103,86 +144,38 @@ async def chat(request: ChatRequest):
     if session.is_complete:
         raise HTTPException(400, "Interview already complete")
 
-    session.messages.append(Message(role=Role.user, content=request.user_message))
+    # Add user message
+    session.messages.append({"role": "user", "content": request.user_message})
     session.transcript.append({"speaker": session.candidate_name, "text": request.user_message})
     session.question_count += 1
 
-    # Build history — Gemini requires alternating user/model turns
+    # Build alternating history for Gemini
+    # Ensure it starts with user and alternates properly
     history = []
-    for msg in session.messages[:-1]:
-        role = "user" if msg.role.value == "user" else "model"
-        history.append({"role": role, "parts": [msg.content]})
-
-    # Remove leading model turn if present
-    while history and history[0]["role"] == "model":
-        history = history[1:]
-
-    # Ensure alternating turns — merge consecutive same-role messages
-    clean_history = []
-    for turn in history:
-        if clean_history and clean_history[-1]["role"] == turn["role"]:
-            clean_history[-1]["parts"][0] += " " + turn["parts"][0]
+    last_role = None
+    for msg in session.messages:
+        role = msg["role"]
+        if role == last_role:
+            # Merge consecutive same-role messages
+            history[-1]["content"] += " " + msg["content"]
         else:
-            clean_history.append({"role": turn["role"], "parts": [turn["parts"][0]]})
+            history.append({"role": role, "content": msg["content"]})
+            last_role = role
 
     try:
-        model = genai.GenerativeModel(
-            model_name="gemini-1.5-flash",
-            system_instruction=SYSTEM_PROMPT
-        )
-        chat_session = model.start_chat(history=clean_history)
-        response = chat_session.send_message(request.user_message)
-        ai_reply = response.text.strip()
+        ai_reply = await call_gemini(history, SYSTEM_PROMPT)
     except Exception as e:
-        print(f"Gemini error: {e}")
+        print(f"Gemini call error: {e}")
         raise HTTPException(500, f"AI error: {str(e)}")
 
     is_complete = "[INTERVIEW_COMPLETE]" in ai_reply
     clean_reply = ai_reply.replace("[INTERVIEW_COMPLETE]", "").strip()
 
-    session.messages.append(Message(role=Role.assistant, content=clean_reply))
+    session.messages.append({"role": "model", "content": clean_reply})
     session.transcript.append({"speaker": "Aria", "text": clean_reply})
     session.is_complete = is_complete
 
     return {"reply": clean_reply, "is_complete": is_complete}
-
-# ── TTS ───────────────────────────────────────────────────────────────────────
-
-async def run_tts(text: str) -> bytes:
-    voices = [
-        ("en-US-JennyNeural", "-5%"),
-        ("en-US-AriaNeural", "-3%"),
-        ("en-GB-SoniaNeural", "-5%"),
-    ]
-    last_err = None
-    for voice, rate in voices:
-        for attempt in range(3):
-            try:
-                communicate = edge_tts.Communicate(text, voice=voice, rate=rate)
-                chunks = []
-                async for chunk in communicate.stream():
-                    if chunk["type"] == "audio":
-                        chunks.append(chunk["data"])
-                if chunks:
-                    return b"".join(chunks)
-            except Exception as e:
-                last_err = e
-                print(f"TTS failed ({voice}, attempt {attempt+1}): {e}")
-                await asyncio.sleep(1)
-    raise Exception(f"All TTS voices failed: {last_err}")
-
-@app.post("/tts")
-async def tts(body: dict):
-    text = body.get("text", "").strip()
-    if not text:
-        raise HTTPException(400, "text required")
-    try:
-        audio_bytes = await run_tts(text)
-        audio_b64 = base64.b64encode(audio_bytes).decode("utf-8")
-        return {"audio_b64": audio_b64}
-    except Exception as e:
-        print(f"TTS endpoint error: {e}")
-        raise HTTPException(500, f"TTS failed: {str(e)}")
 
 # ── Assess ────────────────────────────────────────────────────────────────────
 
