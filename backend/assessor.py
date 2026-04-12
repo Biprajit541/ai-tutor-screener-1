@@ -1,6 +1,6 @@
 import json
 import os
-import google.generativeai as genai
+import httpx
 
 ASSESSMENT_PROMPT = """You are an expert evaluator reviewing a Cuemath tutor screening interview transcript.
 
@@ -26,26 +26,26 @@ Overall:
 - concerns: 1-2 bullet points as strings (or empty array if Advance)
 - standout_quote: The single best quote from the candidate
 
-Respond ONLY with valid JSON. No markdown. No backticks. No extra text:
-{
-  "dimensions": {
-    "communication_clarity": {"score": 0, "label": "Communication Clarity", "evidence": "", "verdict": ""},
-    "warmth_empathy": {"score": 0, "label": "Warmth & Empathy", "evidence": "", "verdict": ""},
-    "simplification_ability": {"score": 0, "label": "Simplification Ability", "evidence": "", "verdict": ""},
-    "patience_adaptability": {"score": 0, "label": "Patience & Adaptability", "evidence": "", "verdict": ""},
-    "english_fluency": {"score": 0, "label": "English Fluency", "evidence": "", "verdict": ""}
-  },
-  "overall_score": 0,
-  "recommendation": "",
-  "recommendation_reason": "",
-  "strengths": [],
-  "concerns": [],
-  "standout_quote": ""
-}"""
+Respond ONLY with valid JSON. No markdown. No backticks. No extra text before or after the JSON object."""
+
+EMPTY_REPORT = {
+    "dimensions": {
+        "communication_clarity": {"score": 5, "label": "Communication Clarity", "evidence": "Insufficient data", "verdict": "Adequate"},
+        "warmth_empathy": {"score": 5, "label": "Warmth & Empathy", "evidence": "Insufficient data", "verdict": "Adequate"},
+        "simplification_ability": {"score": 5, "label": "Simplification Ability", "evidence": "Insufficient data", "verdict": "Adequate"},
+        "patience_adaptability": {"score": 5, "label": "Patience & Adaptability", "evidence": "Insufficient data", "verdict": "Adequate"},
+        "english_fluency": {"score": 5, "label": "English Fluency", "evidence": "Insufficient data", "verdict": "Adequate"}
+    },
+    "overall_score": 5,
+    "recommendation": "Hold",
+    "recommendation_reason": "Insufficient interview data to make a confident assessment. The candidate should be re-interviewed.",
+    "strengths": ["Participated in the screening process"],
+    "concerns": ["Interview was too short to evaluate properly"],
+    "standout_quote": "No significant quotes captured."
+}
 
 async def generate_assessment(transcript: list, candidate_name: str) -> dict:
-    genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
-    model = genai.GenerativeModel("gemini-1.5-flash")
+    api_key = os.getenv("GEMINI_API_KEY")
 
     transcript_text = "\n".join([
         f"{t['speaker']}: {t['text']}"
@@ -54,14 +54,27 @@ async def generate_assessment(transcript: list, candidate_name: str) -> dict:
     ])
 
     if not transcript_text.strip():
-        transcript_text = "Candidate did not speak during the interview."
+        result = EMPTY_REPORT.copy()
+        result["candidate_name"] = candidate_name
+        return result
 
     prompt = f"{ASSESSMENT_PROMPT}\n\nCandidate Name: {candidate_name}\n\nInterview Transcript:\n{transcript_text}"
 
-    response = model.generate_content(prompt)
-    raw = response.text.strip()
+    url = f"https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key={api_key}"
 
-    # Strip markdown fences if Gemini adds them
+    payload = {
+        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+        "generationConfig": {"temperature": 0.3, "maxOutputTokens": 2000}
+    }
+
+    async with httpx.AsyncClient(timeout=60) as client:
+        response = await client.post(url, json=payload)
+        response.raise_for_status()
+        data = response.json()
+
+    raw = data["candidates"][0]["content"]["parts"][0]["text"].strip()
+
+    # Strip markdown fences if present
     if "```" in raw:
         parts = raw.split("```")
         for part in parts:
@@ -72,7 +85,6 @@ async def generate_assessment(transcript: list, candidate_name: str) -> dict:
                 raw = part
                 break
 
-    raw = raw.strip()
-    result = json.loads(raw)
+    result = json.loads(raw.strip())
     result["candidate_name"] = candidate_name
     return result
