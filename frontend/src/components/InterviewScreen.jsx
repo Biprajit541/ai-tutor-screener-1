@@ -19,22 +19,6 @@ export default function InterviewScreen({ session, onComplete }) {
   const phaseRef      = useRef('speaking')
   const mountedRef    = useRef(true)
   const processingRef = useRef(false)
-  const warnTimerRef  = useRef(null)
-
-  // ── Silence callback — called from inside the hook via setInterval ─────────
-  const handleSilence = useCallback(() => {
-    if (phaseRef.current !== 'listening') return
-    if (processingRef.current) return
-    go(() => setSilenceWarn(false))
-    clearTimeout(warnTimerRef.current)
-    handleStopRecording()
-  }, [])
-
-  const { isRecording, audioLevel, startRecording, stopRecording } = useAudioRecorder({
-    onSilence: handleSilence,
-    silenceMs: 2500,
-    speechThreshold: 0.08
-  })
 
   const go = (fn) => { if (mountedRef.current) try { fn() } catch(e) { console.error(e) } }
   const setPhaseAll = (p) => { phaseRef.current = p; go(() => setPhase(p)) }
@@ -47,70 +31,12 @@ export default function InterviewScreen({ session, onComplete }) {
     go(() => setTranscript([...transcriptRef.current]))
   }
 
-  // Show silence warning at halfway point
-  useEffect(() => {
-    if (!isRecording || phase !== 'listening') return
-    if (audioLevel > 0.08) {
-      clearTimeout(warnTimerRef.current)
-      go(() => setSilenceWarn(false))
-      return
-    }
-  }, [audioLevel, isRecording, phase])
-
-  // ── Aria speaks ───────────────────────────────────────────────────────────
-
-  const ariaSpeak = async (text, isComplete) => {
-    if (!mountedRef.current) return
-    setPhaseAll('speaking')
-    go(() => {
-      setStatusText('Aria is speaking...')
-      setErrorMsg('')
-      setSilenceWarn(false)
-    })
-    addLine('Aria', text)
-    await speakText(text)
-    if (!mountedRef.current) return
-    if (isComplete) {
-      setPhaseAll('done')
-      go(() => setStatusText('Interview complete!'))
-      setTimeout(() => { if (mountedRef.current) onComplete(session_id, transcriptRef.current) }, 1200)
-    } else {
-      startListening()
-    }
-  }
-
-  // ── Start listening ───────────────────────────────────────────────────────
-
-  const startListening = async () => {
-    if (!mountedRef.current) return
-    if (phaseRef.current === 'listening') return
-    if (processingRef.current) return
-    clearTimeout(warnTimerRef.current)
-    go(() => setSilenceWarn(false))
-    setPhaseAll('listening')
-    go(() => {
-      setStatusText('Listening — speak your answer')
-      setErrorMsg('')
-    })
-    try {
-      await startRecording()
-    } catch (err) {
-      console.error('Mic error:', err)
-      go(() => {
-        setErrorMsg('Microphone access denied. Please allow mic and refresh.')
-        setPhaseAll('idle')
-        setStatusText('Mic error')
-      })
-    }
-  }
-
-  // ── Stop → transcribe → AI ────────────────────────────────────────────────
-
-  const handleStopRecording = async () => {
+  // handleStopRecording defined before useAudioRecorder so it can be passed as callback
+  const handleStopRecording = useCallback(async () => {
     if (phaseRef.current !== 'listening') return
     if (processingRef.current) return
     processingRef.current = true
-    clearTimeout(warnTimerRef.current)
+
     setPhaseAll('thinking')
     go(() => {
       setStatusText('Processing your answer...')
@@ -119,6 +45,7 @@ export default function InterviewScreen({ session, onComplete }) {
 
     try {
       const blob = await stopRecording()
+
       if (!blob || blob.size < 1000) {
         processingRef.current = false
         go(() => {
@@ -164,6 +91,76 @@ export default function InterviewScreen({ session, onComplete }) {
         setStatusText('Tap mic to retry')
       })
     }
+  }, [session_id, candidate_name])
+
+  // Silence callback — called from setInterval inside hook
+  const onSilence = useCallback(() => {
+    if (phaseRef.current !== 'listening') return
+    if (processingRef.current) return
+    go(() => setSilenceWarn(false))
+    handleStopRecording()
+  }, [handleStopRecording])
+
+  const { isRecording, audioLevel, startRecording, stopRecording } = useAudioRecorder({
+    onSilence,
+    silenceMs: 2500,
+    speechThreshold: 0.08
+  })
+
+  // Show silence warning when audio drops
+  useEffect(() => {
+    if (!isRecording || phase !== 'listening') return
+    if (audioLevel > 0.08) {
+      go(() => setSilenceWarn(false))
+    }
+  }, [audioLevel, isRecording, phase])
+
+  // ── Aria speaks ───────────────────────────────────────────────────────────
+
+  const ariaSpeak = async (text, isComplete) => {
+    if (!mountedRef.current) return
+    setPhaseAll('speaking')
+    go(() => {
+      setStatusText('Aria is speaking...')
+      setErrorMsg('')
+      setSilenceWarn(false)
+    })
+    addLine('Aria', text)
+    await speakText(text)
+    if (!mountedRef.current) return
+    if (isComplete) {
+      setPhaseAll('done')
+      go(() => setStatusText('Interview complete!'))
+      setTimeout(() => { if (mountedRef.current) onComplete(session_id, transcriptRef.current) }, 1200)
+    } else {
+      startListening()
+    }
+  }
+
+  // ── Start listening ───────────────────────────────────────────────────────
+
+  const startListening = async () => {
+    if (!mountedRef.current) return
+    if (phaseRef.current === 'listening') return
+    if (processingRef.current) return
+
+    go(() => setSilenceWarn(false))
+    setPhaseAll('listening')
+    go(() => {
+      setStatusText('Listening — speak your answer')
+      setErrorMsg('')
+    })
+
+    try {
+      await startRecording()
+    } catch (err) {
+      console.error('Mic error:', err)
+      go(() => {
+        setErrorMsg('Microphone access denied. Please allow mic and refresh.')
+        setPhaseAll('idle')
+        setStatusText('Mic error')
+      })
+    }
   }
 
   // ── Mount ─────────────────────────────────────────────────────────────────
@@ -176,6 +173,7 @@ export default function InterviewScreen({ session, onComplete }) {
       if (!mountedRef.current) return
       setPhaseAll('speaking')
       go(() => setStatusText('Aria is speaking...'))
+
       await new Promise(resolve => {
         if (window.speechSynthesis.getVoices().length > 0) { resolve() }
         else {
@@ -186,6 +184,7 @@ export default function InterviewScreen({ session, onComplete }) {
           setTimeout(resolve, 2000)
         }
       })
+
       await speakText(opening_message || '')
       if (mountedRef.current) startListening()
     }
@@ -195,7 +194,6 @@ export default function InterviewScreen({ session, onComplete }) {
     return () => {
       mountedRef.current = false
       stopSpeaking()
-      clearTimeout(warnTimerRef.current)
       try { stopRecording() } catch {}
     }
   }, [])
@@ -215,7 +213,6 @@ export default function InterviewScreen({ session, onComplete }) {
 
   const handleFinish = () => {
     stopSpeaking()
-    clearTimeout(warnTimerRef.current)
     try { stopRecording() } catch {}
     onComplete(session_id, transcriptRef.current)
   }
@@ -276,7 +273,9 @@ export default function InterviewScreen({ session, onComplete }) {
 
           <p style={{
             fontSize: 12, fontWeight: 500, marginTop: '1.1rem',
-            color: phase === 'listening' ? '#6ff7b8' : phase === 'thinking' ? '#f7a26f' : 'var(--text-secondary)',
+            color: phase === 'listening' ? '#6ff7b8'
+              : phase === 'thinking' ? '#f7a26f'
+              : 'var(--text-secondary)',
             transition: 'color 0.3s', textAlign: 'center', minHeight: 18
           }}>
             {statusText}
