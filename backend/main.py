@@ -26,7 +26,15 @@ app.add_middleware(
 
 groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-8b:generateContent"
+
+GEMINI_MODELS = [
+    "gemini-1.5-flash-8b-001",
+    "gemini-1.5-flash-001",
+    "gemini-1.5-flash-002",
+    "gemini-1.5-flash",
+    "gemini-1.0-pro",
+    "gemini-pro",
+]
 
 sessions: Dict[str, SessionState] = {}
 websocket_connections: Dict[str, WebSocket] = {}
@@ -34,11 +42,9 @@ websocket_connections: Dict[str, WebSocket] = {}
 # ── Gemini REST helper ────────────────────────────────────────────────────────
 
 async def call_gemini(messages: list, system: str = "") -> str:
-    """Call Gemini v1 REST API directly — bypasses broken Python library."""
     contents = []
 
     if system:
-        # Inject system prompt as first user message (Gemini v1 doesn't have system role)
         contents.append({
             "role": "user",
             "parts": [{"text": f"[System Instructions]\n{system}\n\n[Begin Interview]"}]
@@ -56,24 +62,34 @@ async def call_gemini(messages: list, system: str = "") -> str:
         "contents": contents,
         "generationConfig": {
             "temperature": 0.75,
-            "maxOutputTokens": 300,
-            "stopSequences": []
+            "maxOutputTokens": 300
         }
     }
 
+    last_error = None
     async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.post(
-            f"{GEMINI_URL}?key={GEMINI_API_KEY}",
-            json=payload
-        )
-        if not resp.is_success:
-            raise HTTPException(500, f"Gemini API error: {resp.status_code} {resp.text}")
-        data = resp.json()
+        for model in GEMINI_MODELS:
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={GEMINI_API_KEY}"
+            try:
+                resp = await client.post(url, json=payload)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    return data["candidates"][0]["content"]["parts"][0]["text"].strip()
+                elif resp.status_code == 404:
+                    print(f"Model {model} not found, trying next...")
+                    continue
+                elif resp.status_code == 429:
+                    raise HTTPException(429, "Gemini rate limit hit. Please wait a moment and try again.")
+                else:
+                    last_error = f"{resp.status_code}: {resp.text}"
+                    continue
+            except HTTPException:
+                raise
+            except Exception as e:
+                last_error = str(e)
+                continue
 
-    try:
-        return data["candidates"][0]["content"]["parts"][0]["text"].strip()
-    except (KeyError, IndexError) as e:
-        raise HTTPException(500, f"Unexpected Gemini response: {data}")
+    raise HTTPException(500, f"All Gemini models failed. Last error: {last_error}")
 
 # ── Session ───────────────────────────────────────────────────────────────────
 
@@ -144,19 +160,16 @@ async def chat(request: ChatRequest):
     if session.is_complete:
         raise HTTPException(400, "Interview already complete")
 
-    # Add user message
     session.messages.append({"role": "user", "content": request.user_message})
     session.transcript.append({"speaker": session.candidate_name, "text": request.user_message})
     session.question_count += 1
 
-    # Build alternating history for Gemini
-    # Ensure it starts with user and alternates properly
+    # Build alternating history
     history = []
     last_role = None
     for msg in session.messages:
         role = msg["role"]
         if role == last_role:
-            # Merge consecutive same-role messages
             history[-1]["content"] += " " + msg["content"]
         else:
             history.append({"role": role, "content": msg["content"]})
