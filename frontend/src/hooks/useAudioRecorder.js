@@ -1,6 +1,6 @@
 import { useState, useRef, useCallback } from 'react'
 
-export function useAudioRecorder({ onSilence, silenceMs = 2500, speechThreshold = 0.08 } = {}) {
+export function useAudioRecorder({ onSilence, silenceMs = 4000, speechThreshold = 0.05 } = {}) {
   const [isRecording, setIsRecording] = useState(false)
   const [audioLevel, setAudioLevel]   = useState(0)
 
@@ -18,7 +18,7 @@ export function useAudioRecorder({ onSilence, silenceMs = 2500, speechThreshold 
   const silenceFired     = useRef(false)
   const onSilenceRef     = useRef(onSilence)
 
-  // Keep onSilence ref current without causing re-renders
+  // Always keep onSilence ref current
   onSilenceRef.current = onSilence
 
   const startRecording = useCallback(async () => {
@@ -29,70 +29,80 @@ export function useAudioRecorder({ onSilence, silenceMs = 2500, speechThreshold 
         echoCancellation: true,
         noiseSuppression: true,
         autoGainControl: true,
-        sampleRate: 16000
       },
       video: false
     })
 
-    streamRef.current    = stream
-    activeRef.current    = true
+    streamRef.current      = stream
+    activeRef.current      = true
     speechDetected.current = false
-    silenceStart.current = null
-    silenceFired.current = false
-    smoothedRef.current  = 0
+    silenceStart.current   = null
+    silenceFired.current   = false
+    smoothedRef.current    = 0
 
     const ctx = new AudioContext()
     ctxRef.current = ctx
     const source = ctx.createMediaStreamSource(stream)
     const analyser = ctx.createAnalyser()
-    analyser.fftSize = 512
-    analyser.smoothingTimeConstant = 0.8
+    analyser.fftSize = 256
+    analyser.smoothingTimeConstant = 0.6  // faster response than before
     source.connect(analyser)
     analyserRef.current = analyser
 
-    // Visual level via requestAnimationFrame
+    // Visual level for orb animation
     const tick = () => {
       if (!activeRef.current) return
       const data = new Uint8Array(analyser.frequencyBinCount)
       analyser.getByteFrequencyData(data)
-      // Speech frequency bins only (300Hz-3400Hz)
-      const bins = Array.from(data).slice(10, 110)
-      const raw = bins.reduce((a, b) => a + b, 0) / bins.length / 128
-      smoothedRef.current = smoothedRef.current * 0.85 + raw * 0.15
+      const avg = data.reduce((a, b) => a + b, 0) / data.length / 128
+      // Light smoothing so orb responds quickly
+      smoothedRef.current = smoothedRef.current * 0.7 + avg * 0.3
       setAudioLevel(smoothedRef.current)
       animRef.current = requestAnimationFrame(tick)
     }
     tick()
 
-    // Silence detection via setInterval — independent of React renders
+    // Silence detection — runs every 100ms independent of React
     intervalRef.current = setInterval(() => {
       if (!activeRef.current) return
       const level = smoothedRef.current
 
       if (level > speechThreshold) {
+        // Speech is happening — reset silence tracking
         speechDetected.current = true
         silenceStart.current   = null
         silenceFired.current   = false
-      } else if (speechDetected.current && !silenceFired.current) {
+      } else {
+        // Below threshold
+        if (!speechDetected.current) return  // haven't spoken yet, ignore
+        if (silenceFired.current) return      // already fired, don't repeat
+
         if (silenceStart.current === null) {
+          // Start counting silence from now
           silenceStart.current = Date.now()
-        } else if (Date.now() - silenceStart.current >= silenceMs) {
-          silenceFired.current = true
-          try { onSilenceRef.current?.() } catch(e) { console.error(e) }
+        } else {
+          const elapsed = Date.now() - silenceStart.current
+          if (elapsed >= silenceMs) {
+            // Silence threshold reached — fire callback
+            silenceFired.current = true
+            try { onSilenceRef.current?.() } catch(e) { console.error('onSilence error:', e) }
+          }
         }
       }
     }, 100)
 
+    // MediaRecorder for capturing audio
     chunksRef.current = []
     const mr = new MediaRecorder(stream, { mimeType: 'audio/webm' })
     mr.ondataavailable = (e) => { if (e.data.size > 0) chunksRef.current.push(e.data) }
-    mr.start(250)
+    mr.start(200)
     mediaRecorderRef.current = mr
     setIsRecording(true)
   }, [silenceMs, speechThreshold])
 
   const stopRecording = useCallback(() => {
     return new Promise((resolve) => {
+      // Stop everything
       activeRef.current      = false
       speechDetected.current = false
       silenceStart.current   = null
