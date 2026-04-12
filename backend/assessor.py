@@ -56,7 +56,6 @@ async def generate_assessment(transcript: list, candidate_name: str) -> dict:
     response = model.generate_content(prompt)
     raw = response.text.strip()
 
-    # Strip markdown fences if present
     if raw.startswith("```"):
         raw = raw.split("```")[1]
         if raw.startswith("json"):
