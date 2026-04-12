@@ -41,24 +41,76 @@ export async function assessCandidate(sessionId) {
   return res.json()
 }
 
-export async function speakText(text, onEnd) {
-  try {
-    const res = await fetch(`${API_URL}/tts`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text })
-    })
-    if (!res.ok) throw new Error('TTS failed')
-    const { audio_b64 } = await res.json()
-    const audio = new Audio(`data:audio/mp3;base64,${audio_b64}`)
-    return new Promise((resolve) => {
-      audio.onended = () => { setTimeout(() => { try { onEnd?.() } catch {} resolve(audio) }, 300) }
-      audio.onerror = () => { try { onEnd?.() } catch {} resolve(null) }
-      audio.play().catch(() => { try { onEnd?.() } catch {} resolve(null) })
-    })
-  } catch (err) {
-    console.error('speakText error:', err)
-    try { onEnd?.() } catch {}
-    return null
-  }
+// ── Browser TTS — free, works everywhere, no server needed ───────────────────
+let currentUtterance = null
+
+export function stopSpeaking() {
+  try { window.speechSynthesis.cancel() } catch {}
+  currentUtterance = null
 }
+
+export function speakText(text) {
+  return new Promise((resolve) => {
+    stopSpeaking()
+
+    // Small delay so cancel() takes effect
+    setTimeout(() => {
+      const utt = new SpeechSynthesisUtterance(text)
+
+      // Pick best available voice
+      const voices = window.speechSynthesis.getVoices()
+      const preferred = (
+        voices.find(v => v.name.includes('Samantha')) ||
+        voices.find(v => v.name.includes('Karen')) ||
+        voices.find(v => v.name.includes('Zira')) ||
+        voices.find(v => v.name.includes('Jenny')) ||
+        voices.find(v => v.lang === 'en-US' && v.localService) ||
+        voices.find(v => v.lang.startsWith('en') && v.localService) ||
+        voices.find(v => v.lang.startsWith('en')) ||
+        voices[0]
+      )
+
+      if (preferred) utt.voice = preferred
+      utt.rate   = 0.88
+      utt.pitch  = 1.05
+      utt.volume = 1
+
+      let resolved = false
+      const done = () => {
+        if (resolved) return
+        resolved = true
+        currentUtterance = null
+        // 600ms gap after speech before mic opens
+        setTimeout(resolve, 600)
+      }
+
+      utt.onend   = done
+      utt.onerror = (e) => {
+        console.error('TTS error:', e)
+        done()
+      }
+
+      // Fallback — estimate word duration + buffer
+      const words = text.trim().split(/\s+/).length
+      const estimatedMs = Math.max((words / 2.2) * 1000 + 1000, 3000)
+      setTimeout(done, estimatedMs)
+
+      currentUtterance = utt
+      try {
+        window.speechSynthesis.speak(utt)
+      } catch (e) {
+        console.error('speak() error:', e)
+        done()
+      }
+    }, 100)
+  })
+}
+
+// Chrome bug: speechSynthesis pauses after ~15s in background tabs
+// Keep it alive with a periodic resume
+setInterval(() => {
+  if (window.speechSynthesis.speaking) {
+    window.speechSynthesis.pause()
+    window.speechSynthesis.resume()
+  }
+}, 10000)
