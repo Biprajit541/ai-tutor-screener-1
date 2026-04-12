@@ -5,7 +5,7 @@ import { useAudioRecorder } from '../hooks/useAudioRecorder.js'
 import { transcribeAudio, sendChatMessage, speakText, stopSpeaking } from '../utils/api.js'
 
 const SILENCE_MS = 4000
-const SPEECH_MIN = 0.005
+const SPEECH_MIN = 0.095
 
 export default function InterviewScreen({ session, onComplete }) {
   const { session_id, opening_message, candidate_name } = session
