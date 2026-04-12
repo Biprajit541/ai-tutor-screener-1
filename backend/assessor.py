@@ -2,151 +2,174 @@ import json
 import os
 from groq import Groq
 
-ASSESSMENT_PROMPT = """You are an expert evaluator reviewing a Cuemath tutor screening interview transcript.
+ASSESSMENT_PROMPT = """You are a strict, fair evaluator reviewing a Cuemath tutor screening interview.
 
-Evaluate the candidate on EXACTLY these 5 dimensions. Score each 1-10.
+IMPORTANT RULES:
+- If the transcript has NO candidate responses, score everything 1 and recommend Decline
+- If answers are very short or vague, score low (3-4)
+- Only score 8+ if there is clear, specific, impressive evidence in the transcript
+- Be honest and critical — this determines who gets hired to teach children
+- Evidence MUST be a real quote or close paraphrase from the transcript, not invented
 
-Return a JSON object with EXACTLY this structure — no deviations:
+Evaluate on these 5 dimensions. Score each 1-10:
 
+1. Communication Clarity (20% weight)
+   - 8-10: Clear, structured, easy to follow with no confusion
+   - 5-7: Mostly clear but some vague parts
+   - 1-4: Unclear, rambling, hard to follow
+
+2. Warmth & Empathy (25% weight)
+   - 8-10: Genuinely warm, shows real care for students with specific examples
+   - 5-7: Some warmth but surface level
+   - 1-4: Cold, robotic, no emotional connection shown
+
+3. Simplification Ability (25% weight)
+   - 8-10: Excellent analogies, breaks complex things down simply and creatively
+   - 5-7: Adequate explanations but not memorable
+   - 1-4: Cannot simplify, uses jargon or too complex language
+
+4. Patience & Adaptability (20% weight)
+   - 8-10: Specific strategies for struggling students, shows real patience
+   - 5-7: General patience mentioned but no specifics
+   - 1-4: No evidence of patience or adaptive teaching
+
+5. English Fluency (10% weight)
+   - 8-10: Natural, fluent, varied vocabulary
+   - 5-7: Understandable but some grammatical issues
+   - 1-4: Significant fluency issues that would affect teaching
+
+Scoring guide:
+- No transcript / no candidate responses → all scores = 1, recommendation = Decline
+- Very short interview (1-2 exchanges) → scores 3-5, recommendation = Hold or Decline
+- Full interview with specific examples → scores 6-9 based on quality
+
+overall_score = (clarity×0.20) + (warmth×0.25) + (simplification×0.25) + (patience×0.20) + (fluency×0.10)
+recommendation:
+- "Advance" ONLY if overall_score >= 7 AND there is clear specific evidence
+- "Hold" if overall_score 5-6.9
+- "Decline" if overall_score < 5 OR no real responses in transcript
+
+Return ONLY this exact JSON structure with no extra text:
 {
   "dimensions": {
-    "communication_clarity": {
-      "score": 8,
-      "label": "Communication Clarity",
-      "evidence": "exact quote or paraphrase from transcript",
-      "verdict": "Strong"
-    },
-    "warmth_empathy": {
-      "score": 8,
-      "label": "Warmth & Empathy",
-      "evidence": "exact quote or paraphrase from transcript",
-      "verdict": "Strong"
-    },
-    "simplification_ability": {
-      "score": 8,
-      "label": "Simplification Ability",
-      "evidence": "exact quote or paraphrase from transcript",
-      "verdict": "Strong"
-    },
-    "patience_adaptability": {
-      "score": 8,
-      "label": "Patience & Adaptability",
-      "evidence": "exact quote or paraphrase from transcript",
-      "verdict": "Strong"
-    },
-    "english_fluency": {
-      "score": 8,
-      "label": "English Fluency",
-      "evidence": "exact quote or paraphrase from transcript",
-      "verdict": "Strong"
-    }
+    "communication_clarity": {"score": 0, "label": "Communication Clarity", "evidence": "direct quote from transcript", "verdict": "Weak"},
+    "warmth_empathy": {"score": 0, "label": "Warmth & Empathy", "evidence": "direct quote from transcript", "verdict": "Weak"},
+    "simplification_ability": {"score": 0, "label": "Simplification Ability", "evidence": "direct quote from transcript", "verdict": "Weak"},
+    "patience_adaptability": {"score": 0, "label": "Patience & Adaptability", "evidence": "direct quote from transcript", "verdict": "Weak"},
+    "english_fluency": {"score": 0, "label": "English Fluency", "evidence": "direct quote from transcript", "verdict": "Weak"}
   },
-  "overall_score": 8,
-  "recommendation": "Advance",
-  "recommendation_reason": "Two sentence explanation here.",
-  "strengths": ["Strength one", "Strength two", "Strength three"],
-  "concerns": ["Concern one"],
-  "standout_quote": "The single most memorable quote from the candidate."
+  "overall_score": 0,
+  "recommendation": "Decline",
+  "recommendation_reason": "Two sentences explaining the recommendation.",
+  "strengths": [],
+  "concerns": ["List at least one concern"],
+  "standout_quote": "Best quote from candidate, or empty string if none"
+}"""
+
+DIMENSION_LABELS = {
+    "communication_clarity":  "Communication Clarity",
+    "warmth_empathy":         "Warmth & Empathy",
+    "simplification_ability": "Simplification Ability",
+    "patience_adaptability":  "Patience & Adaptability",
+    "english_fluency":        "English Fluency",
 }
 
-Rules:
-- score must be an INTEGER between 1 and 10
-- overall_score must be an INTEGER (weighted: clarity 20%, warmth 25%, simplification 25%, patience 20%, fluency 10%)
-- verdict must be exactly "Strong" (8-10), "Adequate" (5-7), or "Weak" (1-4)
-- recommendation must be exactly "Advance" (overall>=7), "Hold" (5-6), or "Decline" (<5)
-- evidence must be a specific quote or close paraphrase from the actual transcript
-- strengths must be an array of 2-3 strings
-- concerns must be an array of strings (empty array [] if recommendation is Advance)
-- DO NOT include any text outside the JSON object
-- DO NOT use markdown or backticks"""
+def has_real_content(transcript: list) -> bool:
+    """Check if the transcript has actual candidate responses."""
+    candidate_lines = [
+        t for t in transcript
+        if isinstance(t, dict)
+        and t.get('speaker') != 'Aria'
+        and len((t.get('text') or '').strip()) > 10
+    ]
+    return len(candidate_lines) >= 1
 
-EMPTY_REPORT = {
-    "dimensions": {
-        "communication_clarity": {"score": 5, "label": "Communication Clarity", "evidence": "Insufficient interview data.", "verdict": "Adequate"},
-        "warmth_empathy": {"score": 5, "label": "Warmth & Empathy", "evidence": "Insufficient interview data.", "verdict": "Adequate"},
-        "simplification_ability": {"score": 5, "label": "Simplification Ability", "evidence": "Insufficient interview data.", "verdict": "Adequate"},
-        "patience_adaptability": {"score": 5, "label": "Patience & Adaptability", "evidence": "Insufficient interview data.", "verdict": "Adequate"},
-        "english_fluency": {"score": 5, "label": "English Fluency", "evidence": "Insufficient interview data.", "verdict": "Adequate"}
-    },
-    "overall_score": 5,
-    "recommendation": "Hold",
-    "recommendation_reason": "Insufficient interview data to make a confident assessment. The candidate should be re-interviewed.",
-    "strengths": ["Participated in the screening process"],
-    "concerns": ["Interview was too short to evaluate properly"],
-    "standout_quote": "No significant quotes captured."
-}
-
-def fix_report(result: dict) -> dict:
-    """Ensure all fields have correct types and required labels."""
+def fix_report(result: dict, has_content: bool) -> dict:
+    """Validate and fix all fields in the report."""
     dims = result.get("dimensions", {})
 
-    required_labels = {
-        "communication_clarity": "Communication Clarity",
-        "warmth_empathy": "Warmth & Empathy",
-        "simplification_ability": "Simplification Ability",
-        "patience_adaptability": "Patience & Adaptability",
-        "english_fluency": "English Fluency"
-    }
-
-    for key, label in required_labels.items():
+    for key, label in DIMENSION_LABELS.items():
         if key not in dims:
-            dims[key] = EMPTY_REPORT["dimensions"][key].copy()
+            dims[key] = {"score": 1, "label": label, "evidence": "No data available.", "verdict": "Weak"}
+
         dim = dims[key]
-        # Force correct label regardless of what model returned
-        dim["label"] = label
+        dim["label"] = label  # always force correct label
+
         # Force score to int
         try:
-            dim["score"] = int(float(str(dim.get("score", 5))))
+            score = int(float(str(dim.get("score", 1))))
+            score = max(1, min(10, score))
         except:
-            dim["score"] = 5
-        # Ensure verdict is valid
-        score = dim["score"]
-        if score >= 8:
-            dim["verdict"] = "Strong"
-        elif score >= 5:
-            dim["verdict"] = "Adequate"
-        else:
-            dim["verdict"] = "Weak"
-        # Ensure evidence exists
-        if not dim.get("evidence"):
-            dim["evidence"] = "No specific quote captured."
+            score = 1
+        dim["score"] = score
+
+        # If no real content, cap score at 3
+        if not has_content:
+            dim["score"] = min(dim["score"], 3)
+
+        # Force correct verdict based on actual score
+        s = dim["score"]
+        dim["verdict"] = "Strong" if s >= 8 else "Adequate" if s >= 5 else "Weak"
+
+        # Ensure evidence is meaningful
+        evidence = str(dim.get("evidence", "")).strip()
+        if not evidence or evidence.lower() in ["n/a", "none", "no data", ""]:
+            dim["evidence"] = "No specific quote available from this candidate."
 
     result["dimensions"] = dims
 
-    # Calculate overall_score as proper integer from dimension scores
+    # Recalculate overall_score from actual dimension scores
     weights = {
-        "communication_clarity": 0.20,
-        "warmth_empathy": 0.25,
+        "communication_clarity":  0.20,
+        "warmth_empathy":         0.25,
         "simplification_ability": 0.25,
-        "patience_adaptability": 0.20,
-        "english_fluency": 0.10
+        "patience_adaptability":  0.20,
+        "english_fluency":        0.10,
     }
     weighted = sum(dims[k]["score"] * w for k, w in weights.items() if k in dims)
     result["overall_score"] = round(weighted)
 
-    # Fix recommendation based on calculated score
+    # If no real content, force score down
+    if not has_content:
+        result["overall_score"] = min(result["overall_score"], 3)
+
+    # Force correct recommendation based on actual score
     score = result["overall_score"]
-    if score >= 7:
+    if score >= 7 and has_content:
         result["recommendation"] = "Advance"
-    elif score >= 5:
+    elif score >= 5 and has_content:
         result["recommendation"] = "Hold"
     else:
         result["recommendation"] = "Decline"
 
-    # Ensure other fields
+    # Ensure recommendation_reason exists
     if not result.get("recommendation_reason"):
-        result["recommendation_reason"] = "Assessment based on interview responses."
+        if not has_content:
+            result["recommendation_reason"] = "The candidate did not provide any responses during the interview. A full interview is required before making any assessment."
+        else:
+            result["recommendation_reason"] = "Assessment based on candidate responses during the interview."
+
+    # Ensure strengths and concerns are lists
     if not isinstance(result.get("strengths"), list):
         result["strengths"] = []
     if not isinstance(result.get("concerns"), list):
         result["concerns"] = []
-    if not result.get("standout_quote"):
+
+    # If no content, force empty strengths and add concern
+    if not has_content:
+        result["strengths"] = []
+        result["concerns"] = ["Candidate did not complete the interview — no responses to evaluate."]
         result["standout_quote"] = ""
+        result["recommendation_reason"] = "No candidate responses were recorded. The interview must be completed before an assessment can be generated."
 
     return result
 
+
 async def generate_assessment(transcript: list, candidate_name: str) -> dict:
     client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+
+    # Check if there's real candidate content
+    content_exists = has_real_content(transcript)
 
     transcript_text = "\n".join([
         f"{t['speaker']}: {t['text']}"
@@ -154,12 +177,29 @@ async def generate_assessment(transcript: list, candidate_name: str) -> dict:
         if isinstance(t, dict) and t.get('speaker') and t.get('text')
     ])
 
-    if not transcript_text.strip():
-        result = EMPTY_REPORT.copy()
+    if not transcript_text.strip() or not content_exists:
+        result = {
+            "dimensions": {
+                key: {"score": 1, "label": label, "evidence": "No candidate responses available.", "verdict": "Weak"}
+                for key, label in DIMENSION_LABELS.items()
+            },
+            "overall_score": 1,
+            "recommendation": "Decline",
+            "recommendation_reason": "No candidate responses were recorded. The interview must be completed before an assessment can be generated.",
+            "strengths": [],
+            "concerns": ["Candidate did not complete the interview — no responses to evaluate."],
+            "standout_quote": ""
+        }
         result["candidate_name"] = candidate_name
         return result
 
-    prompt = f"Candidate Name: {candidate_name}\n\nInterview Transcript:\n{transcript_text}\n\nReturn the JSON assessment now:"
+    prompt = f"""Candidate Name: {candidate_name}
+
+Interview Transcript:
+{transcript_text}
+
+Evaluate this candidate strictly and honestly based ONLY on what they actually said.
+Return the JSON assessment now:"""
 
     try:
         response = client.chat.completions.create(
@@ -168,7 +208,7 @@ async def generate_assessment(transcript: list, candidate_name: str) -> dict:
                 {"role": "system", "content": ASSESSMENT_PROMPT},
                 {"role": "user", "content": prompt}
             ],
-            temperature=0.2,
+            temperature=0.1,  # very low — more deterministic, less hallucination
             max_tokens=2000
         )
         raw = response.choices[0].message.content.strip()
@@ -191,12 +231,25 @@ async def generate_assessment(transcript: list, candidate_name: str) -> dict:
             raw = raw[start:end]
 
         result = json.loads(raw)
-        result = fix_report(result)
+        result = fix_report(result, content_exists)
         result["candidate_name"] = candidate_name
         return result
 
     except Exception as e:
         print(f"Assessment error: {e}")
-        result = fix_report(EMPTY_REPORT.copy())
+        # Return honest empty report
+        result = {
+            "dimensions": {
+                key: {"score": 1, "label": label, "evidence": "Assessment could not be completed.", "verdict": "Weak"}
+                for key, label in DIMENSION_LABELS.items()
+            },
+            "overall_score": 1,
+            "recommendation": "Decline",
+            "recommendation_reason": "The assessment could not be generated due to a technical error. Please retry.",
+            "strengths": [],
+            "concerns": ["Technical error during assessment generation."],
+            "standout_quote": ""
+        }
+        result = fix_report(result, content_exists)
         result["candidate_name"] = candidate_name
         return result
