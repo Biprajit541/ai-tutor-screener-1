@@ -23,7 +23,8 @@ export function useAudioRecorder() {
     ctxRef.current = ctx
     const source = ctx.createMediaStreamSource(stream)
     const analyser = ctx.createAnalyser()
-    analyser.fftSize = 256
+    analyser.fftSize = 512
+    analyser.smoothingTimeConstant = 0.3
     source.connect(analyser)
     analyserRef.current = analyser
 
@@ -31,7 +32,8 @@ export function useAudioRecorder() {
       if (!activeRef.current) return
       const data = new Uint8Array(analyser.frequencyBinCount)
       analyser.getByteFrequencyData(data)
-      setAudioLevel(data.reduce((a, b) => a + b, 0) / data.length / 128)
+      const avg = data.reduce((a, b) => a + b, 0) / data.length
+      setAudioLevel(avg / 128)
       animRef.current = requestAnimationFrame(tick)
     }
     tick()
@@ -39,14 +41,17 @@ export function useAudioRecorder() {
     chunksRef.current = []
     const mr = new MediaRecorder(stream, { mimeType: 'audio/webm' })
     mr.ondataavailable = (e) => { if (e.data.size > 0) chunksRef.current.push(e.data) }
-    mr.start(100)
+    mr.start(250) // collect chunks every 250ms
     mediaRecorderRef.current = mr
     setIsRecording(true)
   }, [])
 
   const stopRecording = useCallback(() => {
     return new Promise((resolve) => {
-      if (!activeRef.current) { resolve(null); return }
+      if (!activeRef.current && chunksRef.current.length === 0) {
+        resolve(null)
+        return
+      }
       activeRef.current = false
       cancelAnimationFrame(animRef.current)
       setAudioLevel(0)
@@ -65,7 +70,7 @@ export function useAudioRecorder() {
       const mr = mediaRecorderRef.current
       if (mr && mr.state !== 'inactive') {
         mr.onstop = finish
-        mr.stop()
+        try { mr.stop() } catch { finish() }
       } else {
         finish()
       }
