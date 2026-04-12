@@ -2,6 +2,7 @@ import os
 import uuid
 import base64
 import tempfile
+import asyncio
 from typing import Dict
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
@@ -66,19 +67,27 @@ async def transcribe(
 ):
     try:
         audio_bytes = await audio.read()
+        if len(audio_bytes) < 1000:
+            return {"text": ""}
         with tempfile.NamedTemporaryFile(suffix=".webm", delete=False) as tmp:
             tmp.write(audio_bytes)
             tmp_path = tmp.name
-        with open(tmp_path, "rb") as f:
-            transcription = groq_client.audio.transcriptions.create(
-                file=("audio.webm", f, "audio/webm"),
-                model="whisper-large-v3",
-                language="en",
-                response_format="text"
-            )
-        os.unlink(tmp_path)
-        return {"text": str(transcription).strip()}
+        try:
+            with open(tmp_path, "rb") as f:
+                transcription = groq_client.audio.transcriptions.create(
+                    file=("audio.webm", f, "audio/webm"),
+                    model="whisper-large-v3",
+                    language="en",
+                    response_format="text"
+                )
+            return {"text": str(transcription).strip()}
+        finally:
+            try:
+                os.unlink(tmp_path)
+            except:
+                pass
     except Exception as e:
+        print(f"Transcription error: {e}")
         raise HTTPException(500, f"Transcription failed: {str(e)}")
 
 # ── Chat via Gemini ───────────────────────────────────────────────────────────
@@ -102,8 +111,9 @@ async def chat(request: ChatRequest):
     if history and history[0]["role"] == "model":
         history = history[1:]
 
+    # Use gemini-1.5-flash-latest — always available
     model = genai.GenerativeModel(
-        model_name="gemini-1.5-flash",
+        model_name="gemini-1.5-flash-latest",
         system_instruction=SYSTEM_PROMPT
     )
     chat_session = model.start_chat(history=history)
@@ -119,7 +129,38 @@ async def chat(request: ChatRequest):
 
     return {"reply": clean_reply, "is_complete": is_complete}
 
-# ── TTS via Edge TTS ──────────────────────────────────────────────────────────
+# ── TTS via Edge TTS with retry ───────────────────────────────────────────────
+
+async def generate_tts_audio(text: str, voice: str = "en-US-JennyNeural") -> bytes:
+    """Generate TTS audio with retry logic."""
+    last_error = None
+    voices_to_try = [
+        ("en-US-JennyNeural", "-5%"),
+        ("en-US-AriaNeural", "-5%"),
+        ("en-GB-SoniaNeural", "-5%"),
+    ]
+
+    for voice_name, rate in voices_to_try:
+        for attempt in range(2):
+            try:
+                communicate = edge_tts.Communicate(
+                    text,
+                    voice=voice_name,
+                    rate=rate,
+                    pitch="+0Hz"
+                )
+                audio_chunks = []
+                async for chunk in communicate.stream():
+                    if chunk["type"] == "audio":
+                        audio_chunks.append(chunk["data"])
+                if audio_chunks:
+                    return b"".join(audio_chunks)
+            except Exception as e:
+                last_error = e
+                print(f"TTS attempt failed ({voice_name}, attempt {attempt+1}): {e}")
+                await asyncio.sleep(0.5)
+
+    raise Exception(f"All TTS attempts failed. Last error: {last_error}")
 
 @app.post("/tts")
 async def tts(body: dict):
@@ -127,20 +168,11 @@ async def tts(body: dict):
     if not text:
         raise HTTPException(400, "text required")
     try:
-        communicate = edge_tts.Communicate(
-            text,
-            voice="en-US-JennyNeural",
-            rate="-5%",
-            pitch="+0Hz"
-        )
-        audio_chunks = []
-        async for chunk in communicate.stream():
-            if chunk["type"] == "audio":
-                audio_chunks.append(chunk["data"])
-        audio_bytes = b"".join(audio_chunks)
+        audio_bytes = await generate_tts_audio(text)
         audio_b64 = base64.b64encode(audio_bytes).decode("utf-8")
         return {"audio_b64": audio_b64}
     except Exception as e:
+        print(f"TTS error: {e}")
         raise HTTPException(500, f"TTS failed: {str(e)}")
 
 # ── Assessment ────────────────────────────────────────────────────────────────
@@ -150,12 +182,16 @@ async def assess_candidate(request: AssessRequest):
     if request.session_id not in sessions:
         raise HTTPException(404, "Session not found")
     session = sessions[request.session_id]
-    report = await generate_assessment(
-        transcript=session.transcript,
-        candidate_name=session.candidate_name
-    )
-    report["session_id"] = request.session_id
-    return report
+    try:
+        report = await generate_assessment(
+            transcript=session.transcript,
+            candidate_name=session.candidate_name
+        )
+        report["session_id"] = request.session_id
+        return report
+    except Exception as e:
+        print(f"Assessment error: {e}")
+        raise HTTPException(500, f"Assessment failed: {str(e)}")
 
 # ── WebSocket ─────────────────────────────────────────────────────────────────
 
