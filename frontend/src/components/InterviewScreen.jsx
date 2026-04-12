@@ -329,16 +329,6 @@ export default function InterviewScreen({ session, onComplete }) {
             {statusText}
           </p>
 
-          {/* ── Visible mic level — shows raw value so we can diagnose ── */}
-          {phase === 'listening' && (
-            <p style={{
-              fontSize: 10, color: debugLevel > 5 ? '#6ff7b8' : 'var(--text-muted)',
-              marginTop: 4, fontFamily: 'monospace'
-            }}>
-              mic level: {debugLevel} {debugLevel > 5 ? '🎤' : ''}
-            </p>
-          )}
-
           {silenceWarn && phase === 'listening' && (
             <div style={{
               width: 120, height: 3, borderRadius: 2, marginTop: 6,
