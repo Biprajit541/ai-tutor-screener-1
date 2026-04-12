@@ -1,6 +1,6 @@
 import json
-import google.generativeai as genai
 import os
+import google.generativeai as genai
 
 ASSESSMENT_PROMPT = """You are an expert evaluator reviewing a Cuemath tutor screening interview transcript.
 
@@ -22,11 +22,11 @@ Overall:
 - overall_score: weighted average (clarity 20%, warmth 25%, simplification 25%, patience 20%, fluency 10%)
 - recommendation: "Advance" (overall >= 7), "Hold" (5-6.9), or "Decline" (< 5)
 - recommendation_reason: 2-sentence explanation
-- strengths: 2-3 bullet points
-- concerns: 1-2 bullet points (or empty array if Advance)
+- strengths: 2-3 bullet points as strings
+- concerns: 1-2 bullet points as strings (or empty array if Advance)
 - standout_quote: The single best quote from the candidate
 
-Respond ONLY with valid JSON, no markdown, no backticks:
+Respond ONLY with valid JSON. No markdown. No backticks. No extra text:
 {
   "dimensions": {
     "communication_clarity": {"score": 0, "label": "Communication Clarity", "evidence": "", "verdict": ""},
@@ -45,30 +45,34 @@ Respond ONLY with valid JSON, no markdown, no backticks:
 
 async def generate_assessment(transcript: list, candidate_name: str) -> dict:
     genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
-    # Use gemini-1.5-flash-latest which is always available
-    model = genai.GenerativeModel("gemini-1.5-flash-latest")
+    model = genai.GenerativeModel("gemini-1.5-flash")
 
     transcript_text = "\n".join([
-        f"{t['speaker']}: {t['text']}" for t in transcript
-        if t.get('speaker') and t.get('text')
+        f"{t['speaker']}: {t['text']}"
+        for t in transcript
+        if isinstance(t, dict) and t.get('speaker') and t.get('text')
     ])
 
     if not transcript_text.strip():
-        transcript_text = "No transcript available."
+        transcript_text = "Candidate did not speak during the interview."
 
-    prompt = f"{ASSESSMENT_PROMPT}\n\nCandidate: {candidate_name}\n\nTranscript:\n{transcript_text}"
+    prompt = f"{ASSESSMENT_PROMPT}\n\nCandidate Name: {candidate_name}\n\nInterview Transcript:\n{transcript_text}"
 
     response = model.generate_content(prompt)
     raw = response.text.strip()
 
-    # Strip markdown fences if present
-    if raw.startswith("```"):
+    # Strip markdown fences if Gemini adds them
+    if "```" in raw:
         parts = raw.split("```")
-        raw = parts[1] if len(parts) > 1 else raw
-        if raw.startswith("json"):
-            raw = raw[4:]
-    raw = raw.strip()
+        for part in parts:
+            part = part.strip()
+            if part.startswith("json"):
+                part = part[4:].strip()
+            if part.startswith("{"):
+                raw = part
+                break
 
+    raw = raw.strip()
     result = json.loads(raw)
     result["candidate_name"] = candidate_name
     return result
