@@ -6,7 +6,6 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Uplo
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 from groq import Groq
-import httpx
 
 from models import SessionState, ChatRequest, AssessRequest
 from interviewer import get_opening_message, SYSTEM_PROMPT
@@ -25,71 +24,9 @@ app.add_middleware(
 )
 
 groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-
-GEMINI_MODELS = [
-    "gemini-1.5-flash-8b-001",
-    "gemini-1.5-flash-001",
-    "gemini-1.5-flash-002",
-    "gemini-1.5-flash",
-    "gemini-1.0-pro",
-    "gemini-pro",
-]
 
 sessions: Dict[str, SessionState] = {}
 websocket_connections: Dict[str, WebSocket] = {}
-
-# ── Gemini REST helper ────────────────────────────────────────────────────────
-
-async def call_gemini(messages: list, system: str = "") -> str:
-    contents = []
-
-    if system:
-        contents.append({
-            "role": "user",
-            "parts": [{"text": f"[System Instructions]\n{system}\n\n[Begin Interview]"}]
-        })
-        contents.append({
-            "role": "model",
-            "parts": [{"text": "Understood. I am ready to begin the interview as Aria."}]
-        })
-
-    for msg in messages:
-        role = "user" if msg["role"] == "user" else "model"
-        contents.append({"role": role, "parts": [{"text": msg["content"]}]})
-
-    payload = {
-        "contents": contents,
-        "generationConfig": {
-            "temperature": 0.75,
-            "maxOutputTokens": 300
-        }
-    }
-
-    last_error = None
-    async with httpx.AsyncClient(timeout=30) as client:
-        for model in GEMINI_MODELS:
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={GEMINI_API_KEY}"
-            try:
-                resp = await client.post(url, json=payload)
-                if resp.status_code == 200:
-                    data = resp.json()
-                    return data["candidates"][0]["content"]["parts"][0]["text"].strip()
-                elif resp.status_code == 404:
-                    print(f"Model {model} not found, trying next...")
-                    continue
-                elif resp.status_code == 429:
-                    raise HTTPException(429, "Gemini rate limit hit. Please wait a moment and try again.")
-                else:
-                    last_error = f"{resp.status_code}: {resp.text}"
-                    continue
-            except HTTPException:
-                raise
-            except Exception as e:
-                last_error = str(e)
-                continue
-
-    raise HTTPException(500, f"All Gemini models failed. Last error: {last_error}")
 
 # ── Session ───────────────────────────────────────────────────────────────────
 
@@ -103,7 +40,7 @@ async def start_session(body: dict):
     session = SessionState(
         session_id=session_id,
         candidate_name=candidate_name,
-        messages=[{"role": "model", "content": opening}],
+        messages=[{"role": "assistant", "content": opening}],
         transcript=[{"speaker": "Aria", "text": opening}]
     )
     sessions[session_id] = session
@@ -127,11 +64,9 @@ async def transcribe(
         audio_bytes = await audio.read()
         if len(audio_bytes) < 500:
             return {"text": ""}
-
         with tempfile.NamedTemporaryFile(suffix=".webm", delete=False) as tmp:
             tmp.write(audio_bytes)
             tmp_path = tmp.name
-
         try:
             with open(tmp_path, "rb") as f:
                 transcription = groq_client.audio.transcriptions.create(
@@ -144,18 +79,16 @@ async def transcribe(
         finally:
             try: os.unlink(tmp_path)
             except: pass
-
     except Exception as e:
         print(f"Transcription error: {e}")
         raise HTTPException(500, f"Transcription failed: {str(e)}")
 
-# ── Chat ──────────────────────────────────────────────────────────────────────
+# ── Chat via Groq LLaMA ───────────────────────────────────────────────────────
 
 @app.post("/chat")
 async def chat(request: ChatRequest):
     if request.session_id not in sessions:
         raise HTTPException(404, "Session not found")
-
     session = sessions[request.session_id]
     if session.is_complete:
         raise HTTPException(400, "Interview already complete")
@@ -164,33 +97,30 @@ async def chat(request: ChatRequest):
     session.transcript.append({"speaker": session.candidate_name, "text": request.user_message})
     session.question_count += 1
 
-    # Build alternating history
-    history = []
-    last_role = None
-    for msg in session.messages:
-        role = msg["role"]
-        if role == last_role:
-            history[-1]["content"] += " " + msg["content"]
-        else:
-            history.append({"role": role, "content": msg["content"]})
-            last_role = role
-
     try:
-        ai_reply = await call_gemini(history, SYSTEM_PROMPT)
+        response = groq_client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT}
+            ] + session.messages,
+            temperature=0.75,
+            max_tokens=300
+        )
+        ai_reply = response.choices[0].message.content.strip()
     except Exception as e:
-        print(f"Gemini call error: {e}")
+        print(f"Groq chat error: {e}")
         raise HTTPException(500, f"AI error: {str(e)}")
 
     is_complete = "[INTERVIEW_COMPLETE]" in ai_reply
     clean_reply = ai_reply.replace("[INTERVIEW_COMPLETE]", "").strip()
 
-    session.messages.append({"role": "model", "content": clean_reply})
+    session.messages.append({"role": "assistant", "content": clean_reply})
     session.transcript.append({"speaker": "Aria", "text": clean_reply})
     session.is_complete = is_complete
 
     return {"reply": clean_reply, "is_complete": is_complete}
 
-# ── Assess ────────────────────────────────────────────────────────────────────
+# ── Assess via Groq LLaMA ─────────────────────────────────────────────────────
 
 @app.post("/assess")
 async def assess_candidate(request: AssessRequest):
