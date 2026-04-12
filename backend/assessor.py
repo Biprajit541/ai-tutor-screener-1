@@ -1,6 +1,6 @@
 import json
 import os
-import httpx
+from groq import Groq
 
 ASSESSMENT_PROMPT = """You are an expert evaluator reviewing a Cuemath tutor screening interview transcript.
 
@@ -26,16 +26,7 @@ Overall:
 - concerns: 1-2 bullet points as strings (or empty array if Advance)
 - standout_quote: The single best quote from the candidate
 
-Respond ONLY with valid JSON. No markdown. No backticks. No extra text."""
-
-GEMINI_MODELS = [
-    "gemini-1.5-flash-8b-001",
-    "gemini-1.5-flash-001",
-    "gemini-1.5-flash-002",
-    "gemini-1.5-flash",
-    "gemini-1.0-pro",
-    "gemini-pro",
-]
+Respond ONLY with valid JSON. No markdown. No backticks. No extra text before or after."""
 
 EMPTY_REPORT = {
     "dimensions": {
@@ -47,14 +38,14 @@ EMPTY_REPORT = {
     },
     "overall_score": 5,
     "recommendation": "Hold",
-    "recommendation_reason": "Insufficient interview data to make a confident assessment. The candidate should be re-interviewed.",
+    "recommendation_reason": "Insufficient interview data to make a confident assessment.",
     "strengths": ["Participated in the screening process"],
     "concerns": ["Interview was too short to evaluate properly"],
     "standout_quote": "No significant quotes captured."
 }
 
 async def generate_assessment(transcript: list, candidate_name: str) -> dict:
-    api_key = os.getenv("GEMINI_API_KEY")
+    client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 
     transcript_text = "\n".join([
         f"{t['speaker']}: {t['text']}"
@@ -67,52 +58,42 @@ async def generate_assessment(transcript: list, candidate_name: str) -> dict:
         result["candidate_name"] = candidate_name
         return result
 
-    prompt = f"{ASSESSMENT_PROMPT}\n\nCandidate Name: {candidate_name}\n\nInterview Transcript:\n{transcript_text}"
+    prompt = f"Candidate Name: {candidate_name}\n\nInterview Transcript:\n{transcript_text}\n\nProvide the assessment JSON now:"
 
-    payload = {
-        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
-        "generationConfig": {"temperature": 0.3, "maxOutputTokens": 2000}
-    }
+    try:
+        response = client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[
+                {"role": "system", "content": ASSESSMENT_PROMPT},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.3,
+            max_tokens=2000
+        )
+        raw = response.choices[0].message.content.strip()
 
-    last_error = None
-    async with httpx.AsyncClient(timeout=60) as client:
-        for model in GEMINI_MODELS:
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
-            try:
-                resp = await client.post(url, json=payload)
-                if resp.status_code == 200:
-                    data = resp.json()
-                    raw = data["candidates"][0]["content"]["parts"][0]["text"].strip()
-                    if "```" in raw:
-                        parts = raw.split("```")
-                        for part in parts:
-                            part = part.strip()
-                            if part.startswith("json"):
-                                part = part[4:].strip()
-                            if part.startswith("{"):
-                                raw = part
-                                break
-                    result = json.loads(raw.strip())
-                    result["candidate_name"] = candidate_name
-                    return result
-                elif resp.status_code == 404:
-                    print(f"Assessor: model {model} not found, trying next...")
-                    continue
-                elif resp.status_code == 429:
-                    print(f"Assessor: rate limit on {model}, trying next...")
-                    continue
-                else:
-                    last_error = f"{resp.status_code}: {resp.text}"
-                    continue
-            except json.JSONDecodeError as e:
-                print(f"Assessor: JSON parse error for {model}: {e}")
-                last_error = "JSON parse error"
-                continue
-            except Exception as e:
-                last_error = str(e)
-                continue
+        # Strip markdown fences if present
+        if "```" in raw:
+            parts = raw.split("```")
+            for part in parts:
+                part = part.strip()
+                if part.startswith("json"):
+                    part = part[4:].strip()
+                if part.startswith("{"):
+                    raw = part
+                    break
 
-    print(f"All models failed for assessment: {last_error}")
-    result = EMPTY_REPORT.copy()
-    result["candidate_name"] = candidate_name
-    return result
+        result = json.loads(raw.strip())
+        result["candidate_name"] = candidate_name
+        return result
+
+    except json.JSONDecodeError as e:
+        print(f"Assessment JSON parse error: {e}")
+        result = EMPTY_REPORT.copy()
+        result["candidate_name"] = candidate_name
+        return result
+    except Exception as e:
+        print(f"Assessment error: {e}")
+        result = EMPTY_REPORT.copy()
+        result["candidate_name"] = candidate_name
+        return result
