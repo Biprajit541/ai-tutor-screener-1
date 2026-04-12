@@ -11,11 +11,20 @@ export function useAudioRecorder() {
   const analyserRef      = useRef(null)
   const animRef          = useRef(null)
   const activeRef        = useRef(false)
+  const smoothedLevel    = useRef(0)
 
   const startRecording = useCallback(async () => {
     if (activeRef.current) return
 
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false })
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+        sampleRate: 16000
+      },
+      video: false
+    })
     streamRef.current = stream
     activeRef.current = true
 
@@ -24,16 +33,26 @@ export function useAudioRecorder() {
     const source = ctx.createMediaStreamSource(stream)
     const analyser = ctx.createAnalyser()
     analyser.fftSize = 512
-    analyser.smoothingTimeConstant = 0.3
+    analyser.smoothingTimeConstant = 0.8
     source.connect(analyser)
     analyserRef.current = analyser
+    smoothedLevel.current = 0
 
     const tick = () => {
       if (!activeRef.current) return
       const data = new Uint8Array(analyser.frequencyBinCount)
       analyser.getByteFrequencyData(data)
-      const avg = data.reduce((a, b) => a + b, 0) / data.length
-      setAudioLevel(avg / 128)
+
+      // Only measure speech frequencies (300Hz-3400Hz)
+      // bin width = sampleRate / fftSize = 16000 / 512 = 31.25Hz
+      // speech range = bins 10 to 109
+      const speechBins = Array.from(data).slice(10, 110)
+      const raw = speechBins.reduce((a, b) => a + b, 0) / speechBins.length / 128
+
+      // Exponential smoothing prevents brief noise spikes from triggering
+      smoothedLevel.current = smoothedLevel.current * 0.85 + raw * 0.15
+      setAudioLevel(smoothedLevel.current)
+
       animRef.current = requestAnimationFrame(tick)
     }
     tick()
@@ -41,7 +60,7 @@ export function useAudioRecorder() {
     chunksRef.current = []
     const mr = new MediaRecorder(stream, { mimeType: 'audio/webm' })
     mr.ondataavailable = (e) => { if (e.data.size > 0) chunksRef.current.push(e.data) }
-    mr.start(250) // collect chunks every 250ms
+    mr.start(250)
     mediaRecorderRef.current = mr
     setIsRecording(true)
   }, [])
@@ -54,6 +73,7 @@ export function useAudioRecorder() {
       }
       activeRef.current = false
       cancelAnimationFrame(animRef.current)
+      smoothedLevel.current = 0
       setAudioLevel(0)
 
       const finish = () => {
