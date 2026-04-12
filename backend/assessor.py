@@ -75,7 +75,6 @@ DIMENSION_LABELS = {
 }
 
 def has_real_content(transcript: list) -> bool:
-    """Check if the transcript has actual candidate responses."""
     candidate_lines = [
         t for t in transcript
         if isinstance(t, dict)
@@ -84,34 +83,32 @@ def has_real_content(transcript: list) -> bool:
     ]
     return len(candidate_lines) >= 1
 
-def fix_report(result: dict, has_content: bool) -> dict:
-    """Validate and fix all fields in the report."""
+def count_candidate_responses(transcript: list) -> int:
+    return len([
+        t for t in transcript
+        if isinstance(t, dict)
+        and t.get('speaker') != 'Aria'
+        and len((t.get('text') or '').strip()) > 10
+    ])
+
+def fix_report(result: dict, has_content: bool, interview_complete: bool) -> dict:
     dims = result.get("dimensions", {})
 
     for key, label in DIMENSION_LABELS.items():
         if key not in dims:
             dims[key] = {"score": 1, "label": label, "evidence": "No data available.", "verdict": "Weak"}
-
         dim = dims[key]
-        dim["label"] = label  # always force correct label
-
-        # Force score to int
+        dim["label"] = label
         try:
             score = int(float(str(dim.get("score", 1))))
             score = max(1, min(10, score))
         except:
             score = 1
         dim["score"] = score
-
-        # If no real content, cap score at 3
         if not has_content:
             dim["score"] = min(dim["score"], 3)
-
-        # Force correct verdict based on actual score
         s = dim["score"]
         dim["verdict"] = "Strong" if s >= 8 else "Adequate" if s >= 5 else "Weak"
-
-        # Ensure evidence is meaningful
         evidence = str(dim.get("evidence", "")).strip()
         if not evidence or evidence.lower() in ["n/a", "none", "no data", ""]:
             dim["evidence"] = "No specific quote available from this candidate."
@@ -129,47 +126,78 @@ def fix_report(result: dict, has_content: bool) -> dict:
     weighted = sum(dims[k]["score"] * w for k, w in weights.items() if k in dims)
     result["overall_score"] = round(weighted)
 
-    # If no real content, force score down
     if not has_content:
         result["overall_score"] = min(result["overall_score"], 3)
 
-    # Force correct recommendation based on actual score
+    # ── Key rule: Advance ONLY if interview fully completed ───────────────────
     score = result["overall_score"]
-    if score >= 7 and has_content:
-        result["recommendation"] = "Advance"
-    elif score >= 5 and has_content:
-        result["recommendation"] = "Hold"
-    else:
+
+    if not has_content:
         result["recommendation"] = "Decline"
-
-    # Ensure recommendation_reason exists
-    if not result.get("recommendation_reason"):
-        if not has_content:
-            result["recommendation_reason"] = "The candidate did not provide any responses during the interview. A full interview is required before making any assessment."
+        result["recommendation_reason"] = (
+            "The candidate did not provide any responses during the interview. "
+            "A full interview must be completed before any assessment can be made."
+        )
+    elif not interview_complete:
+        # Interview was ended early — cap at Hold regardless of scores
+        if score >= 7:
+            result["recommendation"] = "Hold"
+            result["recommendation_reason"] = (
+                "The candidate showed promising responses but did not complete all interview questions. "
+                "A full interview covering all questions is required before advancing to the next round."
+            )
+        elif score >= 5:
+            result["recommendation"] = "Hold"
+            result["recommendation_reason"] = (
+                "The candidate did not complete all interview questions. "
+                "Please schedule a full interview before making a hiring decision."
+            )
         else:
-            result["recommendation_reason"] = "Assessment based on candidate responses during the interview."
+            result["recommendation"] = "Decline"
+            result["recommendation_reason"] = (
+                "The candidate did not complete the interview and responses were insufficient. "
+                "A complete interview is required for proper evaluation."
+            )
+        # Add concern about incomplete interview
+        concerns = result.get("concerns", [])
+        if not isinstance(concerns, list):
+            concerns = []
+        concerns.insert(0, "Interview was not fully completed — not all questions were answered.")
+        result["concerns"] = concerns
+    else:
+        # Interview was fully completed — score normally
+        if score >= 7:
+            result["recommendation"] = "Advance"
+        elif score >= 5:
+            result["recommendation"] = "Hold"
+        else:
+            result["recommendation"] = "Decline"
 
-    # Ensure strengths and concerns are lists
+        if not result.get("recommendation_reason"):
+            result["recommendation_reason"] = "Assessment based on candidate responses during the full interview."
+
     if not isinstance(result.get("strengths"), list):
         result["strengths"] = []
     if not isinstance(result.get("concerns"), list):
         result["concerns"] = []
 
-    # If no content, force empty strengths and add concern
     if not has_content:
         result["strengths"] = []
         result["concerns"] = ["Candidate did not complete the interview — no responses to evaluate."]
         result["standout_quote"] = ""
-        result["recommendation_reason"] = "No candidate responses were recorded. The interview must be completed before an assessment can be generated."
 
     return result
 
 
-async def generate_assessment(transcript: list, candidate_name: str) -> dict:
+async def generate_assessment(
+    transcript: list,
+    candidate_name: str,
+    interview_complete: bool = False
+) -> dict:
     client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 
-    # Check if there's real candidate content
     content_exists = has_real_content(transcript)
+    response_count = count_candidate_responses(transcript)
 
     transcript_text = "\n".join([
         f"{t['speaker']}: {t['text']}"
@@ -191,9 +219,20 @@ async def generate_assessment(transcript: list, candidate_name: str) -> dict:
             "standout_quote": ""
         }
         result["candidate_name"] = candidate_name
+        result["interview_complete"] = interview_complete
         return result
 
+    # Add interview completion context to the prompt
+    completion_note = (
+        "NOTE: The candidate completed all interview questions."
+        if interview_complete else
+        f"NOTE: The candidate only answered {response_count} question(s) and did NOT complete the full interview. "
+        "They pressed 'Finish Interview' early. Do NOT recommend Advance."
+    )
+
     prompt = f"""Candidate Name: {candidate_name}
+
+{completion_note}
 
 Interview Transcript:
 {transcript_text}
@@ -208,12 +247,11 @@ Return the JSON assessment now:"""
                 {"role": "system", "content": ASSESSMENT_PROMPT},
                 {"role": "user", "content": prompt}
             ],
-            temperature=0.1,  # very low — more deterministic, less hallucination
+            temperature=0.1,
             max_tokens=2000
         )
         raw = response.choices[0].message.content.strip()
 
-        # Strip markdown fences
         if "```" in raw:
             parts = raw.split("```")
             for part in parts:
@@ -224,20 +262,19 @@ Return the JSON assessment now:"""
                     raw = part
                     break
 
-        # Find JSON object
         start = raw.find("{")
         end = raw.rfind("}") + 1
         if start != -1 and end > start:
             raw = raw[start:end]
 
         result = json.loads(raw)
-        result = fix_report(result, content_exists)
+        result = fix_report(result, content_exists, interview_complete)
         result["candidate_name"] = candidate_name
+        result["interview_complete"] = interview_complete
         return result
 
     except Exception as e:
         print(f"Assessment error: {e}")
-        # Return honest empty report
         result = {
             "dimensions": {
                 key: {"score": 1, "label": label, "evidence": "Assessment could not be completed.", "verdict": "Weak"}
@@ -250,6 +287,7 @@ Return the JSON assessment now:"""
             "concerns": ["Technical error during assessment generation."],
             "standout_quote": ""
         }
-        result = fix_report(result, content_exists)
+        result = fix_report(result, content_exists, interview_complete)
         result["candidate_name"] = candidate_name
+        result["interview_complete"] = interview_complete
         return result
