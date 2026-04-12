@@ -15,10 +15,11 @@ export default function InterviewScreen({ session, onComplete }) {
   const [errorMsg, setErrorMsg]       = useState('')
   const [silenceWarn, setSilenceWarn] = useState(false)
 
-  const transcriptRef = useRef([{ speaker: 'Aria', text: String(opening_message || '') }])
-  const phaseRef      = useRef('speaking')
-  const mountedRef    = useRef(true)
-  const processingRef = useRef(false)
+  const transcriptRef  = useRef([{ speaker: 'Aria', text: String(opening_message || '') }])
+  const phaseRef       = useRef('speaking')
+  const mountedRef     = useRef(true)
+  const processingRef  = useRef(false)
+  const stopRecordingRef = useRef(null) // ref so handleStopRecording can always access latest
 
   const go = (fn) => { if (mountedRef.current) try { fn() } catch(e) { console.error(e) } }
   const setPhaseAll = (p) => { phaseRef.current = p; go(() => setPhase(p)) }
@@ -31,20 +32,21 @@ export default function InterviewScreen({ session, onComplete }) {
     go(() => setTranscript([...transcriptRef.current]))
   }
 
-  // handleStopRecording defined before useAudioRecorder so it can be passed as callback
+  // ── ariaSpeak forward declaration ref ────────────────────────────────────
+  const ariaSpeakRef = useRef(null)
+
+  // ── handleStopRecording uses ref to stopRecording ─────────────────────────
   const handleStopRecording = useCallback(async () => {
     if (phaseRef.current !== 'listening') return
     if (processingRef.current) return
     processingRef.current = true
 
     setPhaseAll('thinking')
-    go(() => {
-      setStatusText('Processing your answer...')
-      setSilenceWarn(false)
-    })
+    go(() => { setStatusText('Processing your answer...'); setSilenceWarn(false) })
 
     try {
-      const blob = await stopRecording()
+      // Use ref so we always get the current stopRecording function
+      const blob = await stopRecordingRef.current?.()
 
       if (!blob || blob.size < 1000) {
         processingRef.current = false
@@ -79,7 +81,7 @@ export default function InterviewScreen({ session, onComplete }) {
       if (!result?.reply) throw new Error('Empty reply from AI')
 
       processingRef.current = false
-      await ariaSpeak(result.reply, Boolean(result.is_complete))
+      await ariaSpeakRef.current?.(result.reply, Boolean(result.is_complete))
 
     } catch (err) {
       console.error('handleStopRecording error:', err)
@@ -93,7 +95,7 @@ export default function InterviewScreen({ session, onComplete }) {
     }
   }, [session_id, candidate_name])
 
-  // Silence callback — called from setInterval inside hook
+  // ── onSilence callback passed into hook ───────────────────────────────────
   const onSilence = useCallback(() => {
     if (phaseRef.current !== 'listening') return
     if (processingRef.current) return
@@ -101,30 +103,29 @@ export default function InterviewScreen({ session, onComplete }) {
     handleStopRecording()
   }, [handleStopRecording])
 
+  // ── Hook — defined after callbacks so stopRecording is available ──────────
   const { isRecording, audioLevel, startRecording, stopRecording } = useAudioRecorder({
     onSilence,
     silenceMs: 2500,
     speechThreshold: 0.08
   })
 
-  // Show silence warning when audio drops
+  // Keep stopRecordingRef current
+  useEffect(() => {
+    stopRecordingRef.current = stopRecording
+  }, [stopRecording])
+
+  // Show silence warning when audio drops after speech
   useEffect(() => {
     if (!isRecording || phase !== 'listening') return
-    if (audioLevel > 0.08) {
-      go(() => setSilenceWarn(false))
-    }
+    if (audioLevel > 0.08) go(() => setSilenceWarn(false))
   }, [audioLevel, isRecording, phase])
 
-  // ── Aria speaks ───────────────────────────────────────────────────────────
-
+  // ── ariaSpeak ─────────────────────────────────────────────────────────────
   const ariaSpeak = async (text, isComplete) => {
     if (!mountedRef.current) return
     setPhaseAll('speaking')
-    go(() => {
-      setStatusText('Aria is speaking...')
-      setErrorMsg('')
-      setSilenceWarn(false)
-    })
+    go(() => { setStatusText('Aria is speaking...'); setErrorMsg(''); setSilenceWarn(false) })
     addLine('Aria', text)
     await speakText(text)
     if (!mountedRef.current) return
@@ -137,8 +138,10 @@ export default function InterviewScreen({ session, onComplete }) {
     }
   }
 
-  // ── Start listening ───────────────────────────────────────────────────────
+  // Keep ariaSpeakRef current
+  ariaSpeakRef.current = ariaSpeak
 
+  // ── startListening ────────────────────────────────────────────────────────
   const startListening = async () => {
     if (!mountedRef.current) return
     if (phaseRef.current === 'listening') return
@@ -146,10 +149,7 @@ export default function InterviewScreen({ session, onComplete }) {
 
     go(() => setSilenceWarn(false))
     setPhaseAll('listening')
-    go(() => {
-      setStatusText('Listening — speak your answer')
-      setErrorMsg('')
-    })
+    go(() => { setStatusText('Listening — speak your answer'); setErrorMsg('') })
 
     try {
       await startRecording()
@@ -164,7 +164,6 @@ export default function InterviewScreen({ session, onComplete }) {
   }
 
   // ── Mount ─────────────────────────────────────────────────────────────────
-
   useEffect(() => {
     mountedRef.current    = true
     processingRef.current = false
@@ -199,7 +198,6 @@ export default function InterviewScreen({ session, onComplete }) {
   }, [])
 
   // ── Mic tap ───────────────────────────────────────────────────────────────
-
   const handleMicTap = () => {
     if (phaseRef.current === 'thinking') return
     if (phaseRef.current === 'speaking') {
@@ -218,7 +216,6 @@ export default function InterviewScreen({ session, onComplete }) {
   }
 
   // ── Render ────────────────────────────────────────────────────────────────
-
   const orbState = phase === 'listening' ? 'listening'
     : phase === 'thinking' ? 'thinking'
     : phase === 'speaking' ? 'speaking' : 'idle'
