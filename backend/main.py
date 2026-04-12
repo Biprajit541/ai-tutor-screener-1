@@ -130,7 +130,8 @@ async def assess_candidate(request: AssessRequest):
     try:
         report = await generate_assessment(
             transcript=session.transcript,
-            candidate_name=session.candidate_name
+            candidate_name=session.candidate_name,
+            interview_complete=session.is_complete  # pass completion flag
         )
         report["session_id"] = request.session_id
         return report
