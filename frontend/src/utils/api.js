@@ -10,6 +10,17 @@ export async function startSession(candidateName) {
   return res.json()
 }
 
+export async function transcribeAudio(audioBlob) {
+  const formData = new FormData()
+  formData.append('audio', audioBlob, 'recording.webm')
+  const res = await fetch(`${API_URL}/transcribe`, {
+    method: 'POST',
+    body: formData
+  })
+  if (!res.ok) throw new Error('Transcription failed')
+  return res.json()
+}
+
 export async function sendChatMessage(sessionId, userMessage) {
   const res = await fetch(`${API_URL}/chat`, {
     method: 'POST',
@@ -30,49 +41,24 @@ export async function assessCandidate(sessionId) {
   return res.json()
 }
 
-export function speakText(text, onEnd) {
-  return new Promise((resolve) => {
-    try { window.speechSynthesis.cancel() } catch {}
-
-    const go = () => {
-      const utt = new SpeechSynthesisUtterance(text)
-      const voices = window.speechSynthesis.getVoices()
-      const preferred = voices.find(v =>
-        /female|woman|zira|samantha|karen|moira|victoria|fiona/i.test(v.name)
-      ) || voices.find(v => v.lang.startsWith('en')) || voices[0]
-      if (preferred) utt.voice = preferred
-      utt.rate = 0.92
-      utt.pitch = 1.05
-      utt.volume = 1
-
-      let done = false
-      const finish = () => {
-        if (done) return
-        done = true
-        // 300ms after speech ends — just enough to avoid echo, no noticeable delay
-        setTimeout(() => { try { onEnd?.() } catch {} resolve() }, 300)
-      }
-
-      utt.onend = finish
-      utt.onerror = finish
-
-      // Fallback if onend never fires (Chrome background tab bug)
-      const words = text.trim().split(/\s+/).length
-      const ms = Math.max((words / 2.5) * 1000 + 1500, 3000)
-      setTimeout(finish, ms)
-
-      try { window.speechSynthesis.speak(utt) } catch { finish() }
-    }
-
-    // Wait for synthesis to be idle before starting
-    if (!window.speechSynthesis.speaking) {
-      go()
-    } else {
-      const wait = setInterval(() => {
-        if (!window.speechSynthesis.speaking) { clearInterval(wait); go() }
-      }, 100)
-    }
-  })
+export async function speakText(text, onEnd) {
+  try {
+    const res = await fetch(`${API_URL}/tts`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text })
+    })
+    if (!res.ok) throw new Error('TTS failed')
+    const { audio_b64 } = await res.json()
+    const audio = new Audio(`data:audio/mp3;base64,${audio_b64}`)
+    return new Promise((resolve) => {
+      audio.onended = () => { setTimeout(() => { try { onEnd?.() } catch {} resolve(audio) }, 300) }
+      audio.onerror = () => { try { onEnd?.() } catch {} resolve(null) }
+      audio.play().catch(() => { try { onEnd?.() } catch {} resolve(null) })
+    })
+  } catch (err) {
+    console.error('speakText error:', err)
+    try { onEnd?.() } catch {}
+    return null
+  }
 }
-
-export const WS_URL = import.meta.env.VITE_WS_URL || 'ws://localhost:8000'
