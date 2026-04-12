@@ -80,8 +80,8 @@ async def transcribe(
             try: os.unlink(tmp_path)
             except: pass
     except Exception as e:
-        print(f"Transcription error: {e}")
-        raise HTTPException(500, f"Transcription failed: {str(e)}")
+        print(f"Transcription error: {type(e).__name__}")  # only logs error type
+        raise HTTPException(500, "Transcription failed")
 
 # ── Chat via Groq LLaMA ───────────────────────────────────────────────────────
 
@@ -108,8 +108,8 @@ async def chat(request: ChatRequest):
         )
         ai_reply = response.choices[0].message.content.strip()
     except Exception as e:
-        print(f"Groq chat error: {e}")
-        raise HTTPException(500, f"AI error: {str(e)}")
+        print(f"Groq chat error: {type(e).__name__}")  # only logs error type
+        raise HTTPException(500, "AI error")
 
     is_complete = "[INTERVIEW_COMPLETE]" in ai_reply
     clean_reply = ai_reply.replace("[INTERVIEW_COMPLETE]", "").strip()
@@ -131,13 +131,13 @@ async def assess_candidate(request: AssessRequest):
         report = await generate_assessment(
             transcript=session.transcript,
             candidate_name=session.candidate_name,
-            interview_complete=session.is_complete  # pass completion flag
+            interview_complete=session.is_complete
         )
         report["session_id"] = request.session_id
         return report
     except Exception as e:
-        print(f"Assessment error: {e}")
-        raise HTTPException(500, f"Assessment failed: {str(e)}")
+        print(f"Assessment error: {type(e).__name__}")  # only logs error type
+        raise HTTPException(500, "Assessment failed")
 
 # ── WebSocket ─────────────────────────────────────────────────────────────────
 
