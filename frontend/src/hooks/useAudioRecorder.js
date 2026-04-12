@@ -8,7 +8,7 @@ export function useAudioRecorder() {
   const chunksRef        = useRef([])
   const streamRef        = useRef(null)
   const ctxRef           = useRef(null)
-  const analyserRef      = useRef(null) // exposed so InterviewScreen can read it directly
+  const analyserRef      = useRef(null)
   const animRef          = useRef(null)
   const activeRef        = useRef(false)
 
@@ -25,14 +25,19 @@ export function useAudioRecorder() {
 
     const ctx = new AudioContext()
     ctxRef.current = ctx
+
+    // ── Critical fix: resume context if suspended ─────────────────────────
+    if (ctx.state === 'suspended') {
+      await ctx.resume()
+    }
+
     const source = ctx.createMediaStreamSource(stream)
     const analyser = ctx.createAnalyser()
-    analyser.fftSize = 256
-    analyser.smoothingTimeConstant = 0.3
+    analyser.fftSize = 1024
+    analyser.smoothingTimeConstant = 0.2
     source.connect(analyser)
-    analyserRef.current = analyser // store so it can be read externally
+    analyserRef.current = analyser
 
-    // Animation frame just for the orb visual
     const tick = () => {
       if (!activeRef.current) return
       const data = new Uint8Array(analyser.frequencyBinCount)
@@ -53,9 +58,9 @@ export function useAudioRecorder() {
 
   const stopRecording = useCallback(() => {
     return new Promise((resolve) => {
-      activeRef.current = false
-      cancelAnimationFrame(animRef.current)
+      activeRef.current  = false
       analyserRef.current = null
+      cancelAnimationFrame(animRef.current)
       setAudioLevel(0)
 
       const finish = () => {
@@ -81,6 +86,5 @@ export function useAudioRecorder() {
     })
   }, [])
 
-  // Expose analyser so InterviewScreen can read raw levels directly
   return { isRecording, audioLevel, analyserRef, startRecording, stopRecording }
 }
