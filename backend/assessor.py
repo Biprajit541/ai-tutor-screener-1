@@ -60,7 +60,7 @@ async def generate_assessment(transcript: list, candidate_name: str) -> dict:
 
     prompt = f"{ASSESSMENT_PROMPT}\n\nCandidate Name: {candidate_name}\n\nInterview Transcript:\n{transcript_text}"
 
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={api_key}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-8b:generateContent?key={api_key}"
     
     payload = {
         "contents": [{"role": "user", "parts": [{"text": prompt}]}],
