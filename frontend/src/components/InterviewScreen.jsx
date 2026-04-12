@@ -1,11 +1,11 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react'
+import React, { useState, useEffect, useRef } from 'react'
 import OrbAnimation from './OrbAnimation.jsx'
 import TranscriptPanel from './TranscriptPanel.jsx'
 import { useAudioRecorder } from '../hooks/useAudioRecorder.js'
 import { transcribeAudio, sendChatMessage, speakText, stopSpeaking } from '../utils/api.js'
 
-const SILENCE_MS  = 4000   // 4 seconds of silence triggers auto-send
-const SPEECH_MIN  = 0.008  // minimum level to count as speech (very low)
+const SILENCE_MS = 4000
+const SPEECH_MIN = 0.008
 
 export default function InterviewScreen({ session, onComplete }) {
   const { session_id, opening_message, candidate_name } = session
@@ -18,18 +18,22 @@ export default function InterviewScreen({ session, onComplete }) {
   const [errorMsg, setErrorMsg]       = useState('')
   const [silenceWarn, setSilenceWarn] = useState(false)
 
-  const transcriptRef  = useRef([{ speaker: 'Aria', text: String(opening_message || '') }])
-  const phaseRef       = useRef('speaking')
-  const mountedRef     = useRef(true)
-  const processingRef  = useRef(false)
-  const ariaSpeakRef   = useRef(null)
+  const transcriptRef   = useRef([{ speaker: 'Aria', text: String(opening_message || '') }])
+  const phaseRef        = useRef('speaking')
+  const mountedRef      = useRef(true)
+  const processingRef   = useRef(false)
+  const ariaSpeakRef    = useRef(null)
 
-  // Silence detection state — all in refs, no React state
-  const hasSpeech      = useRef(false)   // did user speak at least once?
-  const silenceTimer   = useRef(null)    // the auto-send setTimeout
-  const warnTimer      = useRef(null)    // the warning setTimeout
+  // Audio level ref — updated every frame, read by interval
+  const audioLevelRef   = useRef(0)
+  const silenceInterval = useRef(null)
 
   const { isRecording, audioLevel, startRecording, stopRecording } = useAudioRecorder()
+
+  // Keep audioLevelRef in sync with state — this always stays current
+  useEffect(() => {
+    audioLevelRef.current = audioLevel
+  }, [audioLevel])
 
   const go = (fn) => { if (mountedRef.current) try { fn() } catch(e) { console.error(e) } }
   const setPhaseAll = (p) => { phaseRef.current = p; go(() => setPhase(p)) }
@@ -42,51 +46,10 @@ export default function InterviewScreen({ session, onComplete }) {
     go(() => setTranscript([...transcriptRef.current]))
   }
 
-  const clearSilenceTimers = () => {
-    clearTimeout(silenceTimer.current)
-    clearTimeout(warnTimer.current)
-    silenceTimer.current = null
-    warnTimer.current    = null
+  const stopSilenceInterval = () => {
+    clearInterval(silenceInterval.current)
+    silenceInterval.current = null
   }
-
-  // ── Silence detection via audioLevel ─────────────────────────────────────
-  // This useEffect runs every time audioLevel changes (every animation frame)
-  // All logic uses refs so there are zero stale closure issues
-
-  useEffect(() => {
-    if (!isRecording || phaseRef.current !== 'listening') return
-
-    if (audioLevel > SPEECH_MIN) {
-      // Sound detected — user is speaking
-      hasSpeech.current = true
-      clearSilenceTimers()
-      go(() => setSilenceWarn(false))
-      return
-    }
-
-    // Below threshold — silence
-    // Only start timer if user has spoken at least once
-    if (!hasSpeech.current) return
-
-    // Don't restart timer if already running
-    if (silenceTimer.current) return
-
-    // Show warning at halfway point
-    warnTimer.current = setTimeout(() => {
-      if (phaseRef.current === 'listening' && mountedRef.current) {
-        go(() => setSilenceWarn(true))
-      }
-    }, SILENCE_MS / 2)
-
-    // Auto send after SILENCE_MS
-    silenceTimer.current = setTimeout(() => {
-      if (phaseRef.current !== 'listening' || !mountedRef.current) return
-      console.log('Auto-send triggered after silence')
-      clearSilenceTimers()
-      handleStopRecording()
-    }, SILENCE_MS)
-
-  }, [audioLevel, isRecording])
 
   // ── handleStopRecording ───────────────────────────────────────────────────
 
@@ -95,10 +58,8 @@ export default function InterviewScreen({ session, onComplete }) {
     if (processingRef.current) return
     processingRef.current = true
 
-    clearSilenceTimers()
-    hasSpeech.current = false
+    stopSilenceInterval()
     go(() => setSilenceWarn(false))
-
     setPhaseAll('thinking')
     go(() => setStatusText('Processing your answer...'))
 
@@ -185,8 +146,7 @@ export default function InterviewScreen({ session, onComplete }) {
     if (phaseRef.current === 'listening') return
     if (processingRef.current) return
 
-    clearSilenceTimers()
-    hasSpeech.current = false
+    stopSilenceInterval()
     go(() => setSilenceWarn(false))
     setPhaseAll('listening')
     go(() => { setStatusText('Listening — speak your answer'); setErrorMsg('') })
@@ -200,7 +160,49 @@ export default function InterviewScreen({ session, onComplete }) {
         setPhaseAll('idle')
         setStatusText('Mic error')
       })
+      return
     }
+
+    // ── Silence detection via setInterval ──────────────────────────────────
+    // Runs every 200ms completely outside React
+    // Reads audioLevelRef directly — always current, no stale closures
+    let speechHappened = false
+    let lastSpeechTime = null
+    let warnShown      = false
+
+    silenceInterval.current = setInterval(() => {
+      if (!mountedRef.current || phaseRef.current !== 'listening') {
+        stopSilenceInterval()
+        return
+      }
+
+      const level = audioLevelRef.current
+
+      if (level > SPEECH_MIN) {
+        // User is speaking
+        speechHappened = true
+        lastSpeechTime = Date.now()
+        if (warnShown) {
+          warnShown = false
+          go(() => setSilenceWarn(false))
+        }
+      } else if (speechHappened && lastSpeechTime) {
+        const silent = Date.now() - lastSpeechTime
+
+        // Show warning at halfway
+        if (silent >= SILENCE_MS / 2 && !warnShown) {
+          warnShown = true
+          go(() => setSilenceWarn(true))
+        }
+
+        // Fire auto-send
+        if (silent >= SILENCE_MS) {
+          console.log('Auto-send after silence:', silent, 'ms')
+          stopSilenceInterval()
+          handleStopRecording()
+        }
+      }
+    }, 200)
   }
 
   // ── Mount ─────────────────────────────────────────────────────────────────
@@ -233,7 +235,7 @@ export default function InterviewScreen({ session, onComplete }) {
 
     return () => {
       mountedRef.current = false
-      clearSilenceTimers()
+      stopSilenceInterval()
       stopSpeaking()
       try { stopRecording() } catch {}
     }
@@ -257,7 +259,7 @@ export default function InterviewScreen({ session, onComplete }) {
 
   const handleFinish = () => {
     stopSpeaking()
-    clearSilenceTimers()
+    stopSilenceInterval()
     try { stopRecording() } catch {}
     onComplete(session_id, transcriptRef.current)
   }
