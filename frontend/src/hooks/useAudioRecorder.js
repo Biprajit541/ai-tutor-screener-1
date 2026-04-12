@@ -1,62 +1,76 @@
 import { useState, useRef, useCallback } from 'react'
 
 export function useAudioRecorder() {
-  const [audioLevel, setAudioLevel] = useState(0)
-  const animFrameRef = useRef(null)
-  const streamRef = useRef(null)
-  const ctxRef = useRef(null)
-  const analyserRef = useRef(null)
-  const activeRef = useRef(false)
+  const [isRecording, setIsRecording] = useState(false)
+  const [audioLevel, setAudioLevel]   = useState(0)
 
-  const startLevelTracking = useCallback(async () => {
+  const mediaRecorderRef = useRef(null)
+  const chunksRef        = useRef([])
+  const streamRef        = useRef(null)
+  const ctxRef           = useRef(null)
+  const analyserRef      = useRef(null)
+  const animRef          = useRef(null)
+  const activeRef        = useRef(false)
+
+  const startRecording = useCallback(async () => {
     if (activeRef.current) return
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
-      streamRef.current = stream
 
-      // Reuse existing AudioContext if possible — never close and recreate
-      if (!ctxRef.current || ctxRef.current.state === 'closed') {
-        ctxRef.current = new AudioContext()
-      }
-      if (ctxRef.current.state === 'suspended') {
-        await ctxRef.current.resume()
-      }
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false })
+    streamRef.current = stream
+    activeRef.current = true
 
-      const source = ctxRef.current.createMediaStreamSource(stream)
-      const analyser = ctxRef.current.createAnalyser()
-      analyser.fftSize = 256
-      source.connect(analyser)
-      analyserRef.current = analyser
-      activeRef.current = true
+    const ctx = new AudioContext()
+    ctxRef.current = ctx
+    const source = ctx.createMediaStreamSource(stream)
+    const analyser = ctx.createAnalyser()
+    analyser.fftSize = 256
+    source.connect(analyser)
+    analyserRef.current = analyser
 
-      const tick = () => {
-        if (!activeRef.current) return
-        const data = new Uint8Array(analyser.frequencyBinCount)
-        analyser.getByteFrequencyData(data)
-        const avg = data.reduce((a, b) => a + b, 0) / data.length
-        setAudioLevel(avg / 128)
-        animFrameRef.current = requestAnimationFrame(tick)
-      }
-      tick()
-    } catch (err) {
-      throw err
+    const tick = () => {
+      if (!activeRef.current) return
+      const data = new Uint8Array(analyser.frequencyBinCount)
+      analyser.getByteFrequencyData(data)
+      setAudioLevel(data.reduce((a, b) => a + b, 0) / data.length / 128)
+      animRef.current = requestAnimationFrame(tick)
     }
+    tick()
+
+    chunksRef.current = []
+    const mr = new MediaRecorder(stream, { mimeType: 'audio/webm' })
+    mr.ondataavailable = (e) => { if (e.data.size > 0) chunksRef.current.push(e.data) }
+    mr.start(100)
+    mediaRecorderRef.current = mr
+    setIsRecording(true)
   }, [])
 
-  const stopLevelTracking = useCallback(() => {
-    activeRef.current = false
-    cancelAnimationFrame(animFrameRef.current)
-    // Stop mic stream tracks
-    if (streamRef.current) {
-      streamRef.current.getTracks().forEach(t => t.stop())
-      streamRef.current = null
-    }
-    // Suspend context instead of closing — avoids InvalidStateError on reuse
-    if (ctxRef.current && ctxRef.current.state === 'running') {
-      ctxRef.current.suspend().catch(() => {})
-    }
-    setAudioLevel(0)
+  const stopRecording = useCallback(() => {
+    return new Promise((resolve) => {
+      if (!activeRef.current) { resolve(null); return }
+      activeRef.current = false
+      cancelAnimationFrame(animRef.current)
+      setAudioLevel(0)
+
+      const finish = () => {
+        streamRef.current?.getTracks().forEach(t => t.stop())
+        streamRef.current = null
+        try { ctxRef.current?.close() } catch {}
+        ctxRef.current = null
+        setIsRecording(false)
+        const blob = new Blob(chunksRef.current, { type: 'audio/webm' })
+        chunksRef.current = []
+        resolve(blob)
+      }
+
+      const mr = mediaRecorderRef.current
+      if (mr && mr.state !== 'inactive') {
+        mr.onstop = finish
+        mr.stop()
+      } else {
+        finish()
+      }
+    })
   }, [])
 
-  return { audioLevel, startLevelTracking, stopLevelTracking }
+  return { isRecording, audioLevel, startRecording, stopRecording }
 }
