@@ -4,8 +4,8 @@ import TranscriptPanel from './TranscriptPanel.jsx'
 import { useAudioRecorder } from '../hooks/useAudioRecorder.js'
 import { transcribeAudio, sendChatMessage, speakText, stopSpeaking } from '../utils/api.js'
 
-const SILENCE_MS = 4000   // 4 seconds
-const SPEECH_MIN = 0.01   // minimum raw level to count as speech
+const SILENCE_MS = 4000
+const SPEECH_MIN = 0.005
 
 export default function InterviewScreen({ session, onComplete }) {
   const { session_id, opening_message, candidate_name } = session
@@ -17,6 +17,7 @@ export default function InterviewScreen({ session, onComplete }) {
   const [statusText, setStatusText]   = useState('Aria is speaking...')
   const [errorMsg, setErrorMsg]       = useState('')
   const [silenceWarn, setSilenceWarn] = useState(false)
+  const [debugLevel, setDebugLevel]   = useState(0) // visible level indicator
 
   const transcriptRef   = useRef([{ speaker: 'Aria', text: String(opening_message || '') }])
   const phaseRef        = useRef('speaking')
@@ -43,7 +44,6 @@ export default function InterviewScreen({ session, onComplete }) {
     silenceInterval.current = null
   }
 
-  // ── Read level directly from analyser — no React state involved ───────────
   const getRawLevel = () => {
     const analyser = analyserRef.current
     if (!analyser) return 0
@@ -64,7 +64,7 @@ export default function InterviewScreen({ session, onComplete }) {
     processingRef.current = true
 
     stopSilenceDetection()
-    go(() => setSilenceWarn(false))
+    go(() => { setSilenceWarn(false); setDebugLevel(0) })
     setPhaseAll('thinking')
     go(() => setStatusText('Processing your answer...'))
 
@@ -127,6 +127,7 @@ export default function InterviewScreen({ session, onComplete }) {
       setStatusText('Aria is speaking...')
       setErrorMsg('')
       setSilenceWarn(false)
+      setDebugLevel(0)
     })
     addLine('Aria', text)
     await speakText(text)
@@ -152,7 +153,7 @@ export default function InterviewScreen({ session, onComplete }) {
     if (processingRef.current) return
 
     stopSilenceDetection()
-    go(() => setSilenceWarn(false))
+    go(() => { setSilenceWarn(false); setDebugLevel(0) })
     setPhaseAll('listening')
     go(() => { setStatusText('Listening — speak your answer'); setErrorMsg('') })
 
@@ -169,7 +170,6 @@ export default function InterviewScreen({ session, onComplete }) {
     }
 
     // ── Silence detection ─────────────────────────────────────────────────
-    // Reads directly from Web Audio analyser — no React state, no batching
     let speechHappened = false
     let lastSpeechTime = null
     let warnShown      = false
@@ -182,6 +182,9 @@ export default function InterviewScreen({ session, onComplete }) {
 
       const level = getRawLevel()
 
+      // Update visible level in UI every tick
+      go(() => setDebugLevel(Math.round(level * 1000)))
+
       if (level > SPEECH_MIN) {
         speechHappened = true
         lastSpeechTime = Date.now()
@@ -191,14 +194,11 @@ export default function InterviewScreen({ session, onComplete }) {
         }
       } else if (speechHappened && lastSpeechTime) {
         const silentMs = Date.now() - lastSpeechTime
-
         if (silentMs >= SILENCE_MS / 2 && !warnShown) {
           warnShown = true
           go(() => setSilenceWarn(true))
         }
-
         if (silentMs >= SILENCE_MS) {
-          console.log(`[silence] auto-send after ${silentMs}ms`)
           stopSilenceDetection()
           handleStopRecording()
         }
@@ -328,6 +328,16 @@ export default function InterviewScreen({ session, onComplete }) {
           }}>
             {statusText}
           </p>
+
+          {/* ── Visible mic level — shows raw value so we can diagnose ── */}
+          {phase === 'listening' && (
+            <p style={{
+              fontSize: 10, color: debugLevel > 5 ? '#6ff7b8' : 'var(--text-muted)',
+              marginTop: 4, fontFamily: 'monospace'
+            }}>
+              mic level: {debugLevel} {debugLevel > 5 ? '🎤' : ''}
+            </p>
+          )}
 
           {silenceWarn && phase === 'listening' && (
             <div style={{
