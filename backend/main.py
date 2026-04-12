@@ -58,7 +58,7 @@ async def get_session(session_id: str):
     s = sessions[session_id]
     return {"session_id": session_id, "transcript": s.transcript, "is_complete": s.is_complete}
 
-# ── Transcribe via Groq Whisper ───────────────────────────────────────────────
+# ── Transcribe ────────────────────────────────────────────────────────────────
 
 @app.post("/transcribe")
 async def transcribe(
@@ -67,11 +67,13 @@ async def transcribe(
 ):
     try:
         audio_bytes = await audio.read()
-        if len(audio_bytes) < 1000:
+        if len(audio_bytes) < 500:
             return {"text": ""}
+
         with tempfile.NamedTemporaryFile(suffix=".webm", delete=False) as tmp:
             tmp.write(audio_bytes)
             tmp_path = tmp.name
+
         try:
             with open(tmp_path, "rb") as f:
                 transcription = groq_client.audio.transcriptions.create(
@@ -80,22 +82,23 @@ async def transcribe(
                     language="en",
                     response_format="text"
                 )
-            return {"text": str(transcription).strip()}
+            text = str(transcription).strip()
+            return {"text": text}
         finally:
-            try:
-                os.unlink(tmp_path)
-            except:
-                pass
+            try: os.unlink(tmp_path)
+            except: pass
+
     except Exception as e:
         print(f"Transcription error: {e}")
         raise HTTPException(500, f"Transcription failed: {str(e)}")
 
-# ── Chat via Gemini ───────────────────────────────────────────────────────────
+# ── Chat ──────────────────────────────────────────────────────────────────────
 
 @app.post("/chat")
 async def chat(request: ChatRequest):
     if request.session_id not in sessions:
         raise HTTPException(404, "Session not found")
+
     session = sessions[request.session_id]
     if session.is_complete:
         raise HTTPException(400, "Interview already complete")
@@ -104,21 +107,35 @@ async def chat(request: ChatRequest):
     session.transcript.append({"speaker": session.candidate_name, "text": request.user_message})
     session.question_count += 1
 
+    # Build history — Gemini requires alternating user/model turns
     history = []
     for msg in session.messages[:-1]:
         role = "user" if msg.role.value == "user" else "model"
         history.append({"role": role, "parts": [msg.content]})
-    if history and history[0]["role"] == "model":
+
+    # Remove leading model turn if present
+    while history and history[0]["role"] == "model":
         history = history[1:]
 
-    # Use gemini-1.5-flash-latest — always available
-    model = genai.GenerativeModel(
-        model_name="gemini-1.5-flash-latest",
-        system_instruction=SYSTEM_PROMPT
-    )
-    chat_session = model.start_chat(history=history)
-    response = chat_session.send_message(request.user_message)
-    ai_reply = response.text.strip()
+    # Ensure alternating turns — merge consecutive same-role messages
+    clean_history = []
+    for turn in history:
+        if clean_history and clean_history[-1]["role"] == turn["role"]:
+            clean_history[-1]["parts"][0] += " " + turn["parts"][0]
+        else:
+            clean_history.append({"role": turn["role"], "parts": [turn["parts"][0]]})
+
+    try:
+        model = genai.GenerativeModel(
+            model_name="gemini-1.5-flash",
+            system_instruction=SYSTEM_PROMPT
+        )
+        chat_session = model.start_chat(history=clean_history)
+        response = chat_session.send_message(request.user_message)
+        ai_reply = response.text.strip()
+    except Exception as e:
+        print(f"Gemini error: {e}")
+        raise HTTPException(500, f"AI error: {str(e)}")
 
     is_complete = "[INTERVIEW_COMPLETE]" in ai_reply
     clean_reply = ai_reply.replace("[INTERVIEW_COMPLETE]", "").strip()
@@ -129,38 +146,30 @@ async def chat(request: ChatRequest):
 
     return {"reply": clean_reply, "is_complete": is_complete}
 
-# ── TTS via Edge TTS with retry ───────────────────────────────────────────────
+# ── TTS ───────────────────────────────────────────────────────────────────────
 
-async def generate_tts_audio(text: str, voice: str = "en-US-JennyNeural") -> bytes:
-    """Generate TTS audio with retry logic."""
-    last_error = None
-    voices_to_try = [
+async def run_tts(text: str) -> bytes:
+    voices = [
         ("en-US-JennyNeural", "-5%"),
-        ("en-US-AriaNeural", "-5%"),
+        ("en-US-AriaNeural", "-3%"),
         ("en-GB-SoniaNeural", "-5%"),
     ]
-
-    for voice_name, rate in voices_to_try:
-        for attempt in range(2):
+    last_err = None
+    for voice, rate in voices:
+        for attempt in range(3):
             try:
-                communicate = edge_tts.Communicate(
-                    text,
-                    voice=voice_name,
-                    rate=rate,
-                    pitch="+0Hz"
-                )
-                audio_chunks = []
+                communicate = edge_tts.Communicate(text, voice=voice, rate=rate)
+                chunks = []
                 async for chunk in communicate.stream():
                     if chunk["type"] == "audio":
-                        audio_chunks.append(chunk["data"])
-                if audio_chunks:
-                    return b"".join(audio_chunks)
+                        chunks.append(chunk["data"])
+                if chunks:
+                    return b"".join(chunks)
             except Exception as e:
-                last_error = e
-                print(f"TTS attempt failed ({voice_name}, attempt {attempt+1}): {e}")
-                await asyncio.sleep(0.5)
-
-    raise Exception(f"All TTS attempts failed. Last error: {last_error}")
+                last_err = e
+                print(f"TTS failed ({voice}, attempt {attempt+1}): {e}")
+                await asyncio.sleep(1)
+    raise Exception(f"All TTS voices failed: {last_err}")
 
 @app.post("/tts")
 async def tts(body: dict):
@@ -168,14 +177,14 @@ async def tts(body: dict):
     if not text:
         raise HTTPException(400, "text required")
     try:
-        audio_bytes = await generate_tts_audio(text)
+        audio_bytes = await run_tts(text)
         audio_b64 = base64.b64encode(audio_bytes).decode("utf-8")
         return {"audio_b64": audio_b64}
     except Exception as e:
-        print(f"TTS error: {e}")
+        print(f"TTS endpoint error: {e}")
         raise HTTPException(500, f"TTS failed: {str(e)}")
 
-# ── Assessment ────────────────────────────────────────────────────────────────
+# ── Assess ────────────────────────────────────────────────────────────────────
 
 @app.post("/assess")
 async def assess_candidate(request: AssessRequest):
