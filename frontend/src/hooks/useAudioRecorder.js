@@ -8,7 +8,7 @@ export function useAudioRecorder() {
   const chunksRef        = useRef([])
   const streamRef        = useRef(null)
   const ctxRef           = useRef(null)
-  const analyserRef      = useRef(null)
+  const analyserRef      = useRef(null) // exposed so InterviewScreen can read it directly
   const animRef          = useRef(null)
   const activeRef        = useRef(false)
 
@@ -28,10 +28,11 @@ export function useAudioRecorder() {
     const source = ctx.createMediaStreamSource(stream)
     const analyser = ctx.createAnalyser()
     analyser.fftSize = 256
-    analyser.smoothingTimeConstant = 0.4
+    analyser.smoothingTimeConstant = 0.3
     source.connect(analyser)
-    analyserRef.current = analyser
+    analyserRef.current = analyser // store so it can be read externally
 
+    // Animation frame just for the orb visual
     const tick = () => {
       if (!activeRef.current) return
       const data = new Uint8Array(analyser.frequencyBinCount)
@@ -54,6 +55,7 @@ export function useAudioRecorder() {
     return new Promise((resolve) => {
       activeRef.current = false
       cancelAnimationFrame(animRef.current)
+      analyserRef.current = null
       setAudioLevel(0)
 
       const finish = () => {
@@ -79,5 +81,6 @@ export function useAudioRecorder() {
     })
   }, [])
 
-  return { isRecording, audioLevel, startRecording, stopRecording }
+  // Expose analyser so InterviewScreen can read raw levels directly
+  return { isRecording, audioLevel, analyserRef, startRecording, stopRecording }
 }
