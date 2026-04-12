@@ -4,8 +4,8 @@ import TranscriptPanel from './TranscriptPanel.jsx'
 import { useAudioRecorder } from '../hooks/useAudioRecorder.js'
 import { transcribeAudio, sendChatMessage, speakText, stopSpeaking } from '../utils/api.js'
 
-const SILENCE_MS = 4000
-const SPEECH_MIN = 0.008
+const SILENCE_MS = 4000   // 4 seconds
+const SPEECH_MIN = 0.01   // minimum raw level to count as speech
 
 export default function InterviewScreen({ session, onComplete }) {
   const { session_id, opening_message, candidate_name } = session
@@ -23,17 +23,9 @@ export default function InterviewScreen({ session, onComplete }) {
   const mountedRef      = useRef(true)
   const processingRef   = useRef(false)
   const ariaSpeakRef    = useRef(null)
-
-  // Audio level ref — updated every frame, read by interval
-  const audioLevelRef   = useRef(0)
   const silenceInterval = useRef(null)
 
-  const { isRecording, audioLevel, startRecording, stopRecording } = useAudioRecorder()
-
-  // Keep audioLevelRef in sync with state — this always stays current
-  useEffect(() => {
-    audioLevelRef.current = audioLevel
-  }, [audioLevel])
+  const { isRecording, audioLevel, analyserRef, startRecording, stopRecording } = useAudioRecorder()
 
   const go = (fn) => { if (mountedRef.current) try { fn() } catch(e) { console.error(e) } }
   const setPhaseAll = (p) => { phaseRef.current = p; go(() => setPhase(p)) }
@@ -46,9 +38,22 @@ export default function InterviewScreen({ session, onComplete }) {
     go(() => setTranscript([...transcriptRef.current]))
   }
 
-  const stopSilenceInterval = () => {
+  const stopSilenceDetection = () => {
     clearInterval(silenceInterval.current)
     silenceInterval.current = null
+  }
+
+  // ── Read level directly from analyser — no React state involved ───────────
+  const getRawLevel = () => {
+    const analyser = analyserRef.current
+    if (!analyser) return 0
+    try {
+      const data = new Uint8Array(analyser.frequencyBinCount)
+      analyser.getByteFrequencyData(data)
+      return data.reduce((a, b) => a + b, 0) / data.length / 128
+    } catch {
+      return 0
+    }
   }
 
   // ── handleStopRecording ───────────────────────────────────────────────────
@@ -58,7 +63,7 @@ export default function InterviewScreen({ session, onComplete }) {
     if (processingRef.current) return
     processingRef.current = true
 
-    stopSilenceInterval()
+    stopSilenceDetection()
     go(() => setSilenceWarn(false))
     setPhaseAll('thinking')
     go(() => setStatusText('Processing your answer...'))
@@ -146,7 +151,7 @@ export default function InterviewScreen({ session, onComplete }) {
     if (phaseRef.current === 'listening') return
     if (processingRef.current) return
 
-    stopSilenceInterval()
+    stopSilenceDetection()
     go(() => setSilenceWarn(false))
     setPhaseAll('listening')
     go(() => { setStatusText('Listening — speak your answer'); setErrorMsg('') })
@@ -163,23 +168,21 @@ export default function InterviewScreen({ session, onComplete }) {
       return
     }
 
-    // ── Silence detection via setInterval ──────────────────────────────────
-    // Runs every 200ms completely outside React
-    // Reads audioLevelRef directly — always current, no stale closures
+    // ── Silence detection ─────────────────────────────────────────────────
+    // Reads directly from Web Audio analyser — no React state, no batching
     let speechHappened = false
     let lastSpeechTime = null
     let warnShown      = false
 
     silenceInterval.current = setInterval(() => {
       if (!mountedRef.current || phaseRef.current !== 'listening') {
-        stopSilenceInterval()
+        stopSilenceDetection()
         return
       }
 
-      const level = audioLevelRef.current
+      const level = getRawLevel()
 
       if (level > SPEECH_MIN) {
-        // User is speaking
         speechHappened = true
         lastSpeechTime = Date.now()
         if (warnShown) {
@@ -187,22 +190,20 @@ export default function InterviewScreen({ session, onComplete }) {
           go(() => setSilenceWarn(false))
         }
       } else if (speechHappened && lastSpeechTime) {
-        const silent = Date.now() - lastSpeechTime
+        const silentMs = Date.now() - lastSpeechTime
 
-        // Show warning at halfway
-        if (silent >= SILENCE_MS / 2 && !warnShown) {
+        if (silentMs >= SILENCE_MS / 2 && !warnShown) {
           warnShown = true
           go(() => setSilenceWarn(true))
         }
 
-        // Fire auto-send
-        if (silent >= SILENCE_MS) {
-          console.log('Auto-send after silence:', silent, 'ms')
-          stopSilenceInterval()
+        if (silentMs >= SILENCE_MS) {
+          console.log(`[silence] auto-send after ${silentMs}ms`)
+          stopSilenceDetection()
           handleStopRecording()
         }
       }
-    }, 200)
+    }, 100)
   }
 
   // ── Mount ─────────────────────────────────────────────────────────────────
@@ -235,7 +236,7 @@ export default function InterviewScreen({ session, onComplete }) {
 
     return () => {
       mountedRef.current = false
-      stopSilenceInterval()
+      stopSilenceDetection()
       stopSpeaking()
       try { stopRecording() } catch {}
     }
@@ -259,7 +260,7 @@ export default function InterviewScreen({ session, onComplete }) {
 
   const handleFinish = () => {
     stopSpeaking()
-    stopSilenceInterval()
+    stopSilenceDetection()
     try { stopRecording() } catch {}
     onComplete(session_id, transcriptRef.current)
   }
