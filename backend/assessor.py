@@ -45,19 +45,26 @@ Respond ONLY with valid JSON, no markdown, no backticks:
 
 async def generate_assessment(transcript: list, candidate_name: str) -> dict:
     genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
-    model = genai.GenerativeModel("gemini-1.5-flash")
+    # Use gemini-1.5-flash-latest which is always available
+    model = genai.GenerativeModel("gemini-1.5-flash-latest")
 
     transcript_text = "\n".join([
         f"{t['speaker']}: {t['text']}" for t in transcript
+        if t.get('speaker') and t.get('text')
     ])
+
+    if not transcript_text.strip():
+        transcript_text = "No transcript available."
 
     prompt = f"{ASSESSMENT_PROMPT}\n\nCandidate: {candidate_name}\n\nTranscript:\n{transcript_text}"
 
     response = model.generate_content(prompt)
     raw = response.text.strip()
 
+    # Strip markdown fences if present
     if raw.startswith("```"):
-        raw = raw.split("```")[1]
+        parts = raw.split("```")
+        raw = parts[1] if len(parts) > 1 else raw
         if raw.startswith("json"):
             raw = raw[4:]
     raw = raw.strip()
