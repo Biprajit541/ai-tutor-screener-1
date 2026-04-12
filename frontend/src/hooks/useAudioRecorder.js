@@ -1,6 +1,6 @@
 import { useState, useRef, useCallback } from 'react'
 
-export function useAudioRecorder() {
+export function useAudioRecorder({ onSilence, silenceMs = 2500, speechThreshold = 0.08 } = {}) {
   const [isRecording, setIsRecording] = useState(false)
   const [audioLevel, setAudioLevel]   = useState(0)
 
@@ -10,8 +10,12 @@ export function useAudioRecorder() {
   const ctxRef           = useRef(null)
   const analyserRef      = useRef(null)
   const animRef          = useRef(null)
+  const intervalRef      = useRef(null)
   const activeRef        = useRef(false)
   const smoothedLevel    = useRef(0)
+  const speechDetected   = useRef(false)
+  const silenceStart     = useRef(null)
+  const silenceFired     = useRef(false)
 
   const startRecording = useCallback(async () => {
     if (activeRef.current) return
@@ -27,6 +31,10 @@ export function useAudioRecorder() {
     })
     streamRef.current = stream
     activeRef.current = true
+    speechDetected.current = false
+    silenceStart.current = null
+    silenceFired.current = false
+    smoothedLevel.current = 0
 
     const ctx = new AudioContext()
     ctxRef.current = ctx
@@ -36,26 +44,42 @@ export function useAudioRecorder() {
     analyser.smoothingTimeConstant = 0.8
     source.connect(analyser)
     analyserRef.current = analyser
-    smoothedLevel.current = 0
 
+    // Animation frame for visual level only
     const tick = () => {
       if (!activeRef.current) return
       const data = new Uint8Array(analyser.frequencyBinCount)
       analyser.getByteFrequencyData(data)
-
-      // Only measure speech frequencies (300Hz-3400Hz)
-      // bin width = sampleRate / fftSize = 16000 / 512 = 31.25Hz
-      // speech range = bins 10 to 109
       const speechBins = Array.from(data).slice(10, 110)
       const raw = speechBins.reduce((a, b) => a + b, 0) / speechBins.length / 128
-
-      // Exponential smoothing prevents brief noise spikes from triggering
       smoothedLevel.current = smoothedLevel.current * 0.85 + raw * 0.15
       setAudioLevel(smoothedLevel.current)
-
       animRef.current = requestAnimationFrame(tick)
     }
     tick()
+
+    // Separate interval for silence detection — not affected by React batching
+    intervalRef.current = setInterval(() => {
+      if (!activeRef.current) return
+      const level = smoothedLevel.current
+
+      if (level > speechThreshold) {
+        // Speech detected
+        speechDetected.current = true
+        silenceStart.current = null
+      } else if (speechDetected.current) {
+        // Below threshold after speech — start silence timer
+        if (silenceStart.current === null) {
+          silenceStart.current = Date.now()
+        } else {
+          const elapsed = Date.now() - silenceStart.current
+          if (elapsed >= silenceMs && !silenceFired.current) {
+            silenceFired.current = true
+            onSilence?.()
+          }
+        }
+      }
+    }, 100) // check every 100ms
 
     chunksRef.current = []
     const mr = new MediaRecorder(stream, { mimeType: 'audio/webm' })
@@ -63,7 +87,7 @@ export function useAudioRecorder() {
     mr.start(250)
     mediaRecorderRef.current = mr
     setIsRecording(true)
-  }, [])
+  }, [onSilence, silenceMs, speechThreshold])
 
   const stopRecording = useCallback(() => {
     return new Promise((resolve) => {
@@ -73,7 +97,11 @@ export function useAudioRecorder() {
       }
       activeRef.current = false
       cancelAnimationFrame(animRef.current)
+      clearInterval(intervalRef.current)
       smoothedLevel.current = 0
+      speechDetected.current = false
+      silenceStart.current = null
+      silenceFired.current = false
       setAudioLevel(0)
 
       const finish = () => {
