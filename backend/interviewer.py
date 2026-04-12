@@ -26,7 +26,7 @@ Core Question Bank (pick 3-4, adapt based on flow):
 Rules:
 - Ask ONE question at a time. Always.
 - After each answer, give brief warm acknowledgment (1-2 sentences), then probe deeper OR move to next question.
-- If answer is too short or vague, follow up: "Can you walk me through a specific example?"
+- If answer is too short or vague, follow up with: Can you walk me through a specific example?
 - After question 4, or if the conversation feels complete, wrap up gracefully.
 - When wrapping up, end your FINAL message with exactly: [INTERVIEW_COMPLETE]
 - Keep responses under 80 words. This is a spoken conversation.
