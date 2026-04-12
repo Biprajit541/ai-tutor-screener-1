@@ -26,7 +26,16 @@ Overall:
 - concerns: 1-2 bullet points as strings (or empty array if Advance)
 - standout_quote: The single best quote from the candidate
 
-Respond ONLY with valid JSON. No markdown. No backticks. No extra text before or after the JSON object."""
+Respond ONLY with valid JSON. No markdown. No backticks. No extra text."""
+
+GEMINI_MODELS = [
+    "gemini-1.5-flash-8b-001",
+    "gemini-1.5-flash-001",
+    "gemini-1.5-flash-002",
+    "gemini-1.5-flash",
+    "gemini-1.0-pro",
+    "gemini-pro",
+]
 
 EMPTY_REPORT = {
     "dimensions": {
@@ -60,31 +69,50 @@ async def generate_assessment(transcript: list, candidate_name: str) -> dict:
 
     prompt = f"{ASSESSMENT_PROMPT}\n\nCandidate Name: {candidate_name}\n\nInterview Transcript:\n{transcript_text}"
 
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-8b:generateContent?key={api_key}"
-    
     payload = {
         "contents": [{"role": "user", "parts": [{"text": prompt}]}],
         "generationConfig": {"temperature": 0.3, "maxOutputTokens": 2000}
     }
 
+    last_error = None
     async with httpx.AsyncClient(timeout=60) as client:
-        response = await client.post(url, json=payload)
-        response.raise_for_status()
-        data = response.json()
+        for model in GEMINI_MODELS:
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
+            try:
+                resp = await client.post(url, json=payload)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    raw = data["candidates"][0]["content"]["parts"][0]["text"].strip()
+                    if "```" in raw:
+                        parts = raw.split("```")
+                        for part in parts:
+                            part = part.strip()
+                            if part.startswith("json"):
+                                part = part[4:].strip()
+                            if part.startswith("{"):
+                                raw = part
+                                break
+                    result = json.loads(raw.strip())
+                    result["candidate_name"] = candidate_name
+                    return result
+                elif resp.status_code == 404:
+                    print(f"Assessor: model {model} not found, trying next...")
+                    continue
+                elif resp.status_code == 429:
+                    print(f"Assessor: rate limit on {model}, trying next...")
+                    continue
+                else:
+                    last_error = f"{resp.status_code}: {resp.text}"
+                    continue
+            except json.JSONDecodeError as e:
+                print(f"Assessor: JSON parse error for {model}: {e}")
+                last_error = "JSON parse error"
+                continue
+            except Exception as e:
+                last_error = str(e)
+                continue
 
-    raw = data["candidates"][0]["content"]["parts"][0]["text"].strip()
-
-    # Strip markdown fences if present
-    if "```" in raw:
-        parts = raw.split("```")
-        for part in parts:
-            part = part.strip()
-            if part.startswith("json"):
-                part = part[4:].strip()
-            if part.startswith("{"):
-                raw = part
-                break
-
-    result = json.loads(raw.strip())
+    print(f"All models failed for assessment: {last_error}")
+    result = EMPTY_REPORT.copy()
     result["candidate_name"] = candidate_name
     return result
