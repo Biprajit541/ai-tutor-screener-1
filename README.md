@@ -1,4 +1,4 @@
-# Cuemath AI Tutor Screener
+# AI Tutor Screener
 
 An AI-powered voice interview application that screens tutor candidates for Cuemath. The app conducts a structured conversation, evaluates responses across 5 dimensions, and generates a detailed assessment report — all automatically.
 
