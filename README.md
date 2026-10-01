@@ -7,7 +7,7 @@ An AI-powered voice interview application that screens tutor candidates for Cuem
 ## Live Demo
 
 - **Frontend:** https://ai-tutor-screener-1.vercel.app
-- **Backend API:** https://ai-tutor-screener-1-backend.onrender.com
+- **Backend API:** https://ai-tutor-screener-1-backend.onrender.com/health
 
 ---
 
