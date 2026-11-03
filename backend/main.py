@@ -99,7 +99,7 @@ async def chat(request: ChatRequest):
 
     try:
         response = groq_client.chat.completions.create(
-            model="llama-3.1-70b-versatile",
+            model="openai/gpt-oss-120b",
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT}
             ] + session.messages,
